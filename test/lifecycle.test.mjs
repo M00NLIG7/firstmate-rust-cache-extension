@@ -239,7 +239,7 @@ test("unsafe state-root overrides are refused without modifying foreign trees", 
     assert.equal(result.code, 0, result.stderr);
     result = await cli(["uninstall", "--remove-cache"], project, env);
     assert.equal(result.code, 2);
-    assert.match(result.stderr, /(ownership marker|state root must not be)/);
+    assert.match(result.stderr, /descriptor-bound cleanup is unavailable/);
     assert.equal(await readFile(join(project, "must-survive"), "utf8"), "sentinel\n");
     assert.equal((await stat(project)).mode & 0o777, modeBefore, "refusal must not chmod a project tree");
     const foreignConfig = join(root, "credential directory");

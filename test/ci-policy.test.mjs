@@ -43,6 +43,10 @@ test("CI workflow uses reviewed immutable execution inputs", async () => {
     "rustup toolchain install 1.85.0 --profile minimal",
     "rustup default 1.86.0",
   ]);
+  assert.deepEqual(scriptLines(step(linux, "Install Git")), [
+    "apt-get update",
+    "apt-get install --no-install-recommends --yes git",
+  ]);
   assert.deepEqual(scriptLines(step(macos, "Install reviewed Rust toolchains")), [
     "rustup toolchain install 1.86.0 --profile minimal",
     "rustup toolchain install 1.85.0 --profile minimal",
