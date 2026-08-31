@@ -10,6 +10,12 @@ const compilerArgs = process.argv.slice(3);
 const backend = process.env.FIRSTMATE_RUST_CACHE_BACKEND;
 const leaseDirectory = process.env.FIRSTMATE_RUST_CACHE_LEASE_DIR;
 const leaseToken = process.env.FIRSTMATE_RUST_CACHE_LEASE_TOKEN;
+const leaseDevice = process.env.FIRSTMATE_RUST_CACHE_LEASE_DEVICE;
+const leaseInode = process.env.FIRSTMATE_RUST_CACHE_LEASE_INODE;
+
+function hasLeaseDirectoryIdentity() {
+  return /^\d+$/.test(leaseDevice || "") && /^\d+$/.test(leaseInode || "");
+}
 
 async function openPinnedDirectory(path) {
   if (process.platform !== "linux") return null;
@@ -26,6 +32,11 @@ async function openPinnedDirectory(path) {
     }
     const info = await handle.stat();
     if ((typeof process.getuid === "function" && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) {
+      await handle.close();
+      return null;
+    }
+    const identity = await handle.stat({ bigint: true });
+    if (String(identity.dev) !== leaseDevice || String(identity.ino) !== leaseInode) {
       await handle.close();
       return null;
     }
@@ -51,7 +62,7 @@ async function removePinnedLease(handle, name) {
 }
 
 async function createLease() {
-  if (!leaseDirectory || !tokenPattern.test(leaseToken || "")) return null;
+  if (!leaseDirectory || !tokenPattern.test(leaseToken || "") || !hasLeaseDirectoryIdentity()) return null;
   const directory = await openPinnedDirectory(leaseDirectory);
   if (!directory) return null;
   const name = `${leaseToken}.${process.pid}.json`;

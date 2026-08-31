@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
-import { finishExecution, prepareExecution } from "../lib/core.mjs";
+import { finishExecution, prepareExecution, supportsPinnedCompilerLeases } from "../lib/core.mjs";
 import { cli, createProject, makeEnvironment, status, temporaryRoot, writeExecutable } from "./helpers.mjs";
 
 async function waitFor(predicate, timeoutMs = 5_000) {
@@ -83,6 +83,16 @@ test("aggregate configured limits are enforced before cache state is created", a
     result = await cli(["limits", "--max-size", "16MiB"], first, env);
     assert.equal(result.code, 2, "lowering below allocated namespaces must refuse");
     await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("pinned lease support requires an accessible procfs boundary", async () => {
+  const root = await temporaryRoot("procfs capability");
+  try {
+    assert.equal(await supportsPinnedCompilerLeases("darwin"), false);
+    assert.equal(await supportsPinnedCompilerLeases("linux", join(root, "missing procfs")), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -222,6 +232,31 @@ test("clean refuses a symlinked lease directory without touching foreign leases"
     assert.equal(result.code, 2);
     assert.match(result.stderr, /symlinked|unsafe-state/);
     assert.equal(await readFile(foreignLease, "utf8"), '{"pid":999999}\n');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("clean preserves a namespace when its leases directory identity changes", { skip: process.platform !== "linux" }, async () => {
+  const root = await temporaryRoot("lease identity");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/lease-identity.git");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\necho 'sccache 0.17.0'\n");
+    const env = await makeEnvironment(root, backend);
+    let result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+    const plan = await prepareExecution(project, env);
+    assert.equal(plan.state, "ready");
+
+    await rename(plan.namespace.leasesDir, join(plan.namespace.namespaceDir, "retired leases"));
+    await mkdir(plan.namespace.leasesDir, { mode: 0o700 });
+
+    result = await cli(["clean", "--project", project], project, env);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /leases directory identity changed/);
+    await stat(plan.namespace.namespaceDir);
+    await finishExecution(plan);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

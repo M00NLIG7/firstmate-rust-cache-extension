@@ -17,16 +17,15 @@ import {
   inspectActivation,
   isCargoInvocationWithinProject,
   prepareExecution,
-  statusForProject,
 } from "../lib/core.mjs";
 
 /** @param {import("@earendil-works/pi-coding-agent").ExtensionAPI} pi */
 export default function firstmateRustCache(pi) {
   let bashRegistered = false;
 
-  const updateStatus = async (ctx) => {
-    const status = await statusForProject(ctx.cwd, {}, process.env);
-    const namespace = status.namespace ? ` ${status.namespace.slice(0, 8)}` : "";
+  const updateStatus = async (ctx, activation = null) => {
+    const status = activation || (await inspectActivation(ctx.cwd, process.env));
+    const namespace = status.namespace ? ` ${status.namespace.namespaceId.slice(0, 8)}` : "";
     const text =
       status.state === "ready"
         ? `rust cache: on${namespace}`
@@ -111,7 +110,7 @@ export default function firstmateRustCache(pi) {
       registerCachedBash(ctx.cwd);
       collectExpired(process.env).catch(() => {});
     }
-    await updateStatus(ctx);
+    await updateStatus(ctx, activation);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {

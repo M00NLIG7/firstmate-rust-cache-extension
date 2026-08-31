@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import { REPO_ROOT, run, temporaryRoot, writeExecutable } from "./helpers.mjs";
 
 const supportsPinnedLeases = process.platform === "linux";
+
+async function leaseIdentity(path) {
+  const info = await stat(path, { bigint: true });
+  return {
+    FIRSTMATE_RUST_CACHE_LEASE_DEVICE: String(info.dev),
+    FIRSTMATE_RUST_CACHE_LEASE_INODE: String(info.ino),
+  };
+}
 
 test("a failed compiler invoked through sccache is not replayed", async () => {
   const root = await temporaryRoot("wrapper");
@@ -31,6 +39,7 @@ test("a failed compiler invoked through sccache is not replayed", async () => {
         FIRSTMATE_RUST_CACHE_BACKEND: backend,
         FIRSTMATE_RUST_CACHE_LEASE_DIR: leases,
         FIRSTMATE_RUST_CACHE_LEASE_TOKEN: "0123456789abcdef0123456789abcdef",
+        ...(await leaseIdentity(leases)),
         TEST_INVOCATIONS: invocations,
       },
     });
@@ -38,6 +47,38 @@ test("a failed compiler invoked through sccache is not replayed", async () => {
     assert.equal(result.code, 19, result.stderr);
     assert.equal(result.stderr, "compiler failed\n");
     assert.equal(await readFile(invocations, "utf8"), supportsPinnedLeases ? "backend\ncompiler\n" : "compiler\n");
+    assert.deepEqual(await readdir(leases), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a mismatched compiler lease identity falls open before sccache starts", async () => {
+  const root = await temporaryRoot("wrapper lease identity");
+  try {
+    const invocations = join(root, "invocations");
+    const compiler = join(root, "compiler");
+    const backend = join(root, "backend");
+    const leases = join(root, "leases");
+    await mkdir(leases, { mode: 0o700 });
+    await writeExecutable(compiler, "#!/bin/sh\nprintf 'compiler\\n' >> \"$TEST_INVOCATIONS\"\nexit 29\n");
+    await writeExecutable(backend, "#!/bin/sh\nprintf 'backend\\n' >> \"$TEST_INVOCATIONS\"\nexit 31\n");
+
+    const result = await run(join(REPO_ROOT, "bin", "fm-rustc-wrapper"), [compiler], {
+      cwd: root,
+      env: {
+        ...process.env,
+        FIRSTMATE_RUST_CACHE_BACKEND: backend,
+        FIRSTMATE_RUST_CACHE_LEASE_DIR: leases,
+        FIRSTMATE_RUST_CACHE_LEASE_TOKEN: "0123456789abcdef0123456789abcdef",
+        FIRSTMATE_RUST_CACHE_LEASE_DEVICE: "0",
+        FIRSTMATE_RUST_CACHE_LEASE_INODE: "0",
+        TEST_INVOCATIONS: invocations,
+      },
+    });
+
+    assert.equal(result.code, 29, result.stderr);
+    assert.equal(await readFile(invocations, "utf8"), "compiler\n");
     assert.deepEqual(await readdir(leases), []);
   } finally {
     await rm(root, { recursive: true, force: true });

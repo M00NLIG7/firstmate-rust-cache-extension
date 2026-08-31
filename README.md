@@ -31,7 +31,7 @@ unchanged so a selected namespace cannot cross an unselected working directory.
 
 ## Requirements
 
-- Linux with procfs for cacheable compiler launches; macOS and other unsupported platforms report `unsupported-platform` and run selected Cargo commands uncached without creating cache state
+- Linux with a usable `/proc/self/fd` procfs boundary for cacheable compiler launches; macOS and other unsupported platforms report `unsupported-platform` and run selected Cargo commands uncached without creating cache state
 - Node.js 20 or newer
 - Pi >=0.84.0 <0.85.0 (the tested public extension contract)
 - Rust/Cargo

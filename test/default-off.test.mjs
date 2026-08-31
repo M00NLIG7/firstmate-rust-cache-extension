@@ -75,6 +75,41 @@ test("installation is inert until an explicit project/workload selection exists"
   }
 });
 
+test("unselected sessions and status do not probe the configured backend", async () => {
+  const root = await temporaryRoot("unselected backend");
+  try {
+    const selected = await createProject(root, "selected", "git@github.com:example/selected-backend.git");
+    const unselected = await createProject(root, "unselected", "git@github.com:example/unselected-backend.git");
+    const probe = join(root, "backend probe");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\n: > \"$FIRSTMATE_RUST_CACHE_TEST_BACKEND_PROBE\"\necho 'sccache 0.17.0'\n");
+    const env = await makeEnvironment(root, backend);
+    env.FIRSTMATE_RUST_CACHE_TEST_BACKEND_PROBE = probe;
+    let result = await cli(["enable", "--project", selected, "--max-size", "8MiB"], selected, env);
+    assert.equal(result.code, 0, result.stderr);
+
+    result = await cli(["status", "--project", unselected, "--json"], unselected, env);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(JSON.parse(result.stdout).reason, "selection-absent");
+    await assert.rejects(stat(probe), { code: "ENOENT" });
+
+    const previous = { ...process.env };
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, env);
+    try {
+      const harness = fakePi();
+      firstmateRustCache(harness.api);
+      await harness.events.get("session_start")({}, fakeContext(unselected));
+    } finally {
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, previous);
+    }
+    await assert.rejects(stat(probe), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("unsupported platforms run selected Cargo builds ordinarily without cache state", { skip: process.platform === "linux" }, async () => {
   const root = await temporaryRoot("platform fallback");
   try {
