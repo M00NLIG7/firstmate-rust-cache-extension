@@ -31,7 +31,7 @@ unchanged so a selected namespace cannot cross an unselected working directory.
 
 ## Requirements
 
-- Linux with a usable `/proc/self/fd` procfs boundary for cacheable compiler launches; macOS and other unsupported platforms report `unsupported-platform` and run selected Cargo commands uncached without creating cache state
+- A runtime with descriptor-relative filesystem operations that can bind namespace creation, activation, and recursive cleanup to an opened directory identity. The current Node runtime does not expose that primitive, so every platform reports `unsupported-platform` and runs selected Cargo commands uncached without creating cache state.
 - Node.js 20 or newer
 - Pi >=0.84.0 <0.85.0 (the tested public extension contract)
 - Rust/Cargo
@@ -281,7 +281,7 @@ npm test
 npm run test:platform-fallback
 ```
 
-Run `npm test` on Linux: its integration suite requires sccache 0.17+ and runs real Cargo/rustc commands. Run `npm run test:platform-fallback` on macOS to exercise ordinary-build fallback without cache mutation.
+Run `npm test` on Linux when a descriptor-bound cache runtime is available: its integration suite requires sccache 0.17+ and runs real Cargo/rustc commands. Run `npm run test:platform-fallback` to exercise ordinary-build fallback without cache mutation.
 It covers default inertness, opt-in, repeat hits, project/flag/feature separation,
 backend absence, limits and targeted cleanup, idempotence, spaces, concurrency,
 interruption, and uninstall preservation.

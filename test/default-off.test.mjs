@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import firstmateRustCache from "../extensions/firstmate-rust-cache.mjs";
-import { finishExecution, prepareExecution } from "../lib/core.mjs";
+import { finishExecution, prepareExecution, supportsDescriptorBoundCacheOperations } from "../lib/core.mjs";
 import { cli, createProject, makeEnvironment, REPO_ROOT, run, temporaryRoot, writeExecutable } from "./helpers.mjs";
 
 function fakePi() {
@@ -110,7 +110,7 @@ test("unselected sessions and status do not probe the configured backend", async
   }
 });
 
-test("unsupported platforms run selected Cargo builds ordinarily without cache state", { skip: process.platform === "linux" }, async () => {
+test("unsupported platforms run selected Cargo builds ordinarily without cache state", { skip: supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("platform fallback");
   try {
     const project = await createProject(root, "selected", "git@github.com:example/platform-fallback.git");
@@ -136,7 +136,7 @@ test("unsupported platforms run selected Cargo builds ordinarily without cache s
   }
 });
 
-test("an unselected Pi session leaves expired selected cache state untouched", { skip: process.platform !== "linux" }, async () => {
+test("an unselected Pi session leaves expired selected cache state untouched", { skip: process.platform !== "linux" || !supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("unselected session");
   try {
     const selected = await createProject(root, "selected", "git@github.com:example/selected.git");

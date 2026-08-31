@@ -1,9 +1,15 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
-import { finishExecution, prepareExecution, supportsPinnedCompilerLeases } from "../lib/core.mjs";
+import {
+  finishExecution,
+  prepareExecution,
+  supportsDescriptorBoundCacheOperations,
+  supportsPinnedCompilerLeases,
+} from "../lib/core.mjs";
 import { cli, createProject, makeEnvironment, status, temporaryRoot, writeExecutable } from "./helpers.mjs";
 
 async function waitFor(predicate, timeoutMs = 5_000) {
@@ -98,6 +104,56 @@ test("pinned lease support requires an accessible procfs boundary", async () => 
   }
 });
 
+test("activation preserves namespace state when descriptor-bound operations are unavailable", async () => {
+  const root = await temporaryRoot("descriptor activation");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/descriptor-activation.git");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\necho 'sccache 0.17.0'\n");
+    const env = await makeEnvironment(root, backend);
+    const result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+    const activation = await prepareExecution(project, env);
+    assert.equal(supportsDescriptorBoundCacheOperations(), false);
+    assert.equal(activation.state, "bypass");
+    assert.equal(activation.reason, "unsupported-platform");
+    await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("uninstall preserves owned cache data without descriptor-bound removal", { skip: supportsDescriptorBoundCacheOperations() }, async () => {
+  const root = await temporaryRoot("descriptor cleanup");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/descriptor-cleanup.git");
+    const env = await makeEnvironment(root, null);
+    let result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+
+    const cacheRoot = env.FIRSTMATE_RUST_CACHE_CACHE_DIR;
+    await mkdir(cacheRoot, { recursive: true, mode: 0o700 });
+    const identity = await stat(cacheRoot, { bigint: true });
+    await writeFile(
+      join(cacheRoot, ".firstmate-rust-cache-root.json"),
+      `${JSON.stringify({
+        schema: "firstmate-rust-cache.root.v1",
+        root_id: createHash("sha256").update(resolve(cacheRoot)).digest("hex"),
+        directory: { device: String(identity.dev), inode: String(identity.ino) },
+      })}\n`,
+      { mode: 0o600 },
+    );
+    await writeFile(join(cacheRoot, "must-survive"), "sentinel\n", { mode: 0o600 });
+
+    result = await cli(["uninstall", "--remove-cache"], project, env);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /descriptor-bound cleanup is unavailable/);
+    assert.equal(await readFile(join(cacheRoot, "must-survive"), "utf8"), "sentinel\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("unsafe state-root overrides are refused without modifying foreign trees", async () => {
   const root = await temporaryRoot("safe cleanup");
   try {
@@ -148,7 +204,7 @@ test("symlinked state-root ancestors are refused before creating package state",
     assert.equal(result.code, 0, result.stderr);
     const activation = await prepareExecution(project, env);
     assert.equal(activation.state, "bypass");
-    assert.equal(activation.reason, process.platform === "linux" ? "unsafe-state" : "unsupported-platform");
+    assert.equal(activation.reason, "unsupported-platform");
     assert.equal(await readFile(join(foreign, "must-survive"), "utf8"), "sentinel\n");
     assert.deepEqual(await readdir(foreign), ["must-survive"]);
 
@@ -208,7 +264,7 @@ test("run bypasses shell and foreign Cargo manifest commands", async () => {
   }
 });
 
-test("clean refuses a symlinked lease directory without touching foreign leases", { skip: process.platform !== "linux" }, async () => {
+test("clean refuses a symlinked lease directory without touching foreign leases", { skip: process.platform !== "linux" || !supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("lease symlink");
   try {
     const project = await createProject(root, "project", "git@github.com:example/lease-symlink.git");
@@ -237,7 +293,7 @@ test("clean refuses a symlinked lease directory without touching foreign leases"
   }
 });
 
-test("clean preserves a namespace when its leases directory identity changes", { skip: process.platform !== "linux" }, async () => {
+test("clean preserves a namespace when its leases directory identity changes", { skip: process.platform !== "linux" || !supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("lease identity");
   try {
     const project = await createProject(root, "project", "git@github.com:example/lease-identity.git");
@@ -262,7 +318,7 @@ test("clean preserves a namespace when its leases directory identity changes", {
   }
 });
 
-test("clean refuses a replaced namespace without deleting either directory", { skip: process.platform !== "linux" }, async () => {
+test("clean refuses a replaced namespace without deleting either directory", { skip: process.platform !== "linux" || !supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("namespace replacement");
   try {
     const project = await createProject(root, "project", "git@github.com:example/namespace-replacement.git");
@@ -291,7 +347,7 @@ test("clean refuses a replaced namespace without deleting either directory", { s
   }
 });
 
-test("uninstall preserves a replaced cache root", { skip: process.platform !== "linux" }, async () => {
+test("uninstall preserves a replaced cache root", { skip: process.platform !== "linux" || !supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("cache root replacement");
   try {
     const project = await createProject(root, "project", "git@github.com:example/cache-root-replacement.git");
@@ -348,7 +404,7 @@ test("clean refuses a symlinked runtime ancestor without touching foreign socket
   }
 });
 
-test("a prepared activation bypasses after concurrent cache removal", { skip: process.platform !== "linux" }, async () => {
+test("a prepared activation bypasses after concurrent cache removal", { skip: process.platform !== "linux" || !supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("activation race");
   try {
     const project = await createProject(root, "project", "git@github.com:example/activation-race.git");
