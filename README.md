@@ -31,7 +31,7 @@ unchanged so a selected namespace cannot cross an unselected working directory.
 
 ## Requirements
 
-- A runtime with descriptor-relative filesystem operations that can bind namespace creation, activation, and recursive cleanup to an opened directory identity. The current Node runtime does not expose that primitive, so every platform reports `unsupported-platform` and runs selected Cargo commands uncached without creating cache state.
+- A runtime with descriptor-relative filesystem operations that can bind namespace creation, activation, and recursive cleanup to an opened directory identity. The current Node runtime does not expose that primitive, so every platform reports `unsupported-platform` and runs selected Cargo commands uncached without creating cache state. When an existing owned cache tree is present, `clean` and `uninstall --remove-cache` report `cleanup-unsupported` and preserve it rather than attempting removal.
 - Node.js 20 or newer
 - Pi >=0.84.0 <0.85.0 (the tested public extension contract)
 - Rust/Cargo
@@ -184,9 +184,10 @@ allocations fit:
 
 sccache receives each namespace maximum minus a 256 KiB reserve for the owned
 state/config files, so backend artifacts plus namespace metadata remain inside
-the configured allocation. Retention defaults to 30 days and is
-applied without a monitor at Pi session start for a ready selection and by explicit `gc`; an in-use
-namespace is skipped. `disable` is idempotent and preserves data:
+the configured allocation when descriptor-bound containment is available.
+Retention defaults to 30 days and applies without a monitor at Pi session start
+for a ready selection and by explicit `gc`; an in-use namespace is skipped.
+`disable` is idempotent and preserves data:
 
 ```text
 /rust-cache disable
@@ -195,12 +196,14 @@ namespace is skipped. `disable` is idempotent and preserves data:
 /rust-cache forget
 ```
 
-`clean` removes only the current selected namespace (`--all` means every
-namespace under this extension's private cache root). It takes an identity lock,
-refuses live build leases, stops only that namespace's sccache socket, atomically
-retires the directory, then removes it without following links. `forget` requires
-the selection to be disabled **and cleaned**; it never strands unallocated cache
-data by forgetting a live namespace.
+When descriptor-bound containment is available, `clean` removes only the current
+selected namespace (`--all` means every namespace under this extension's private
+cache root). It takes an identity lock, refuses live build leases, stops only
+that namespace's sccache socket, and removes the directory without following
+links. Without that primitive, `clean` refuses removal with
+`cleanup-unsupported` and preserves cache data. `forget` requires the selection
+to be disabled **and cleaned**; it never strands unallocated cache data by
+forgetting a live namespace.
 
 Neither cleanup nor uninstall ever targets Cargo registries, Cargo Git checkouts,
 source trees, project `target/` directories, credentials, Firstmate state, or
@@ -227,15 +230,19 @@ pi remove git:github.com/M00NLIG7/firstmate-rust-cache-extension
 validated configuration as a cache index alongside the documented cache tree;
 that conservative index keeps retained namespace allocations inside the global
 bound after reinstall. It cannot activate caching while disabled. To leave no
-package-owned data:
+package-owned data when descriptor-bound containment is available:
 
 ```text
 /rust-cache uninstall --remove-cache
 ```
 
-Both flows are idempotent. Cache removal refuses active leases or an unprovable
-live backend instead of risking an unrelated process. Reinstalling the same
-reviewed package is sufficient to inspect or remove deliberately retained cache.
+Both flows are idempotent. Cache removal refuses active leases, an unprovable
+live backend, or an unavailable descriptor-bound removal primitive instead of
+risking an unrelated process. On the current Node runtime,
+`uninstall --remove-cache` reports `cleanup-unsupported` and preserves existing
+cache data and configuration; use `--keep-cache` to disable selections while
+retaining the index. Reinstalling the same reviewed package is sufficient to
+inspect deliberately retained cache.
 
 ## Support matrix
 
@@ -243,8 +250,8 @@ reviewed package is sufficient to inspect or remove deliberately retained cache.
 
 | Harness | Automatic cache support | Boundary |
 | --- | --- | --- |
-| Pi 0.84.x | **Supported and tested** | Public Pi package + built-in LLM `bash` override after selection. |
-| pi-signed using Pi 0.84.x | **Supported contract; not separately binary-tested here** | Firstmate documents the same Pi engine/extension behavior; install in that host's Pi package home. |
+| Pi 0.84.x | **Package supported; caching unavailable** | Public Pi package loads after selection, but the current Node runtime lacks descriptor-bound containment. |
+| pi-signed using Pi 0.84.x | **Package contract; caching unavailable** | Firstmate documents the same Pi engine/extension behavior; install in that host's Pi package home. |
 | Claude, Codex, OpenCode, Grok, Kimi, Cursor, Muse | **Unsupported** | Firstmate's public package host exposes no worker hook, and this package does not inject instructions or alter core launch templates. |
 | Raw/unverified launch commands | **Unsupported** | No public loading or environment contract is assumed. |
 
@@ -281,7 +288,11 @@ npm test
 npm run test:platform-fallback
 ```
 
-Run `npm test` on Linux when a descriptor-bound cache runtime is available: its integration suite requires sccache 0.17+ and runs real Cargo/rustc commands. Run `npm run test:platform-fallback` to exercise ordinary-build fallback without cache mutation.
-It covers default inertness, opt-in, repeat hits, project/flag/feature separation,
-backend absence, limits and targeted cleanup, idempotence, spaces, concurrency,
-interruption, and uninstall preservation.
+Run `npm test` on Linux when a descriptor-bound cache runtime is available: its
+integration suite requires sccache 0.17+ and runs real Cargo/rustc commands.
+With the current Node runtime, run `npm run test:platform-fallback` to exercise
+the actionable `unsupported-platform` ordinary-build fallback and verify no
+cache mutation. The suite covers default inertness, opt-in, backend absence,
+limits, cleanup refusal, idempotence, spaces, concurrency, interruption, and
+uninstall preservation; cache-hit coverage is gated on a descriptor-bound
+runtime.
