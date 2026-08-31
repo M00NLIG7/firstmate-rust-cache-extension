@@ -6,6 +6,15 @@ import test from "node:test";
 import { finishExecution, prepareExecution } from "../lib/core.mjs";
 import { cli, createProject, makeEnvironment, status, temporaryRoot, writeExecutable } from "./helpers.mjs";
 
+async function waitFor(predicate, timeoutMs = 5_000) {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 25));
+  }
+  throw new Error("timed out waiting for observable state");
+}
+
 test("enable/disable are idempotent and backend absence runs an ordinary Cargo build", async () => {
   const root = await temporaryRoot("lifecycle");
   try {
@@ -213,6 +222,37 @@ test("clean refuses a symlinked lease directory without touching foreign leases"
     assert.equal(result.code, 2);
     assert.match(result.stderr, /symlinked|unsafe-state/);
     assert.equal(await readFile(foreignLease, "utf8"), '{"pid":999999}\n');
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a prepared activation bypasses after concurrent cache removal", async () => {
+  const root = await temporaryRoot("activation race");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/activation-race.git");
+    const backend = join(root, "sccache");
+    const probe = join(root, "backend probe");
+    const release = join(root, "backend release");
+    await writeExecutable(
+      backend,
+      "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then\n  if [ ! -e \"$FIRSTMATE_RUST_CACHE_TEST_PROBE\" ]; then\n    : > \"$FIRSTMATE_RUST_CACHE_TEST_PROBE\"\n    while [ ! -e \"$FIRSTMATE_RUST_CACHE_TEST_RELEASE\" ]; do sleep 0.02; done\n  fi\n  echo 'sccache 0.17.0'\n  exit 0\nfi\nexit 1\n",
+    );
+    const env = await makeEnvironment(root, backend);
+    env.FIRSTMATE_RUST_CACHE_TEST_PROBE = probe;
+    env.FIRSTMATE_RUST_CACHE_TEST_RELEASE = release;
+    let result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+
+    const activation = prepareExecution(project, env);
+    await waitFor(async () => stat(probe).then(() => true).catch(() => false));
+    result = await cli(["uninstall", "--remove-cache"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+    await writeFile(release, "release\n");
+
+    const plan = await activation;
+    assert.equal(plan.state, "disabled");
+    await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
