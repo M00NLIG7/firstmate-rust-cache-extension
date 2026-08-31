@@ -1,85 +1,115 @@
 #!/usr/bin/env node
-import { constants as fsConstants } from "node:fs";
-import { lstat, open, unlink } from "node:fs/promises";
-import { basename, join, resolve, sep } from "node:path";
+import { spawn } from "node:child_process";
 
-const approvedAncestorSymlinks = new Set(process.platform === "darwin" ? ["/var", "/tmp"] : []);
-const tokenPattern = /^[0-9a-f]{32}$/;
+const approvedAncestorSymlinks = process.platform === "darwin" ? ["/var", "/tmp"] : [];
+const helper = String.raw`
+import json
+import os
+import stat
+import sys
 
-async function validateDirectory(path) {
-  const pieces = resolve(path).split(sep).filter(Boolean);
-  let current = sep;
-  for (const piece of pieces) {
-    current = join(current, piece);
-    let info;
-    try {
-      info = await lstat(current);
-    } catch {
-      return false;
-    }
-    if (info.isSymbolicLink()) {
-      if (approvedAncestorSymlinks.has(current)) continue;
-      return false;
-    }
-    if (!info.isDirectory()) return false;
-    if (current === resolve(path)) {
-      if (typeof process.getuid === "function" && info.uid !== process.getuid()) return false;
-      if ((info.mode & 0o077) !== 0) return false;
-    }
-  }
-  return true;
-}
+APPROVED = set(sys.argv[1].split("\x1f")) if sys.argv[1] else set()
+operation, directory, token, pid_or_path = sys.argv[2:]
 
-async function isRegularLease(path) {
-  try {
-    const info = await lstat(path);
-    return info.isFile() && !info.isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
+def open_directory(path):
+    resolved = os.path.abspath(path)
+    parts = [part for part in resolved.split(os.sep) if part]
+    fd = os.open(os.sep, os.O_RDONLY | os.O_DIRECTORY)
+    current = ""
+    try:
+        for part in parts:
+            current += os.sep + part
+            flags = os.O_RDONLY | os.O_DIRECTORY
+            if current not in APPROVED:
+                flags |= os.O_NOFOLLOW
+            next_fd = os.open(part, flags, dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise OSError("unsafe directory")
+        return fd, resolved
+    except:
+        os.close(fd)
+        raise
 
-function leaseName(token, pid) {
-  if (!tokenPattern.test(token) || !/^[1-9][0-9]*$/.test(pid)) return null;
-  return `${token}.${pid}.json`;
-}
+def valid_name(name):
+    pieces = name.split(".")
+    return len(pieces) == 3 and len(pieces[0]) == 32 and all(c in "0123456789abcdef" for c in pieces[0]) and pieces[1].isdigit() and int(pieces[1]) > 0 and pieces[2] == "json"
 
-async function create(directory, token, pid) {
-  const name = leaseName(token, pid);
-  if (!name || !(await validateDirectory(directory))) return false;
-  const path = join(resolve(directory), name);
-  let lease;
-  try {
-    lease = await open(
-      path,
-      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
-      0o600,
-    );
-    await lease.writeFile(`${JSON.stringify({ pid: Number(pid), token, created_at: new Date().toISOString() })}\n`);
-  } catch {
-    return false;
-  } finally {
-    await lease?.close().catch(() => {});
-  }
-  if (!(await validateDirectory(directory)) || !(await isRegularLease(path))) return false;
-  process.stdout.write(path);
-  return true;
-}
+def create():
+    if len(token) != 32 or any(c not in "0123456789abcdef" for c in token) or not pid_or_path.isdigit() or int(pid_or_path) <= 0:
+        return False
+    name = token + "." + pid_or_path + ".json"
+    fd, resolved = open_directory(directory)
+    created = False
+    try:
+        lease_fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=fd)
+        created = True
+        try:
+            payload = (json.dumps({"pid": int(pid_or_path), "token": token}) + "\n").encode()
+            if os.write(lease_fd, payload) != len(payload):
+                raise OSError("incomplete lease write")
+        finally:
+            os.close(lease_fd)
+        info = os.lstat(name, dir_fd=fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise OSError("unsafe lease")
+        print(os.path.join(resolved, name), end="")
+        return True
+    except:
+        if created:
+            try:
+                os.unlink(name, dir_fd=fd)
+            except:
+                pass
+        return False
+    finally:
+        os.close(fd)
 
-async function remove(directory, path) {
-  const name = basename(path);
-  if (!/^[0-9a-f]{32}\.[1-9][0-9]*\.json$/.test(name)) return false;
-  if (resolve(path) !== join(resolve(directory), name)) return false;
-  if (!(await validateDirectory(directory)) || !(await isRegularLease(path))) return false;
-  await unlink(path).catch(() => {});
-  return true;
+def remove():
+    name = os.path.basename(pid_or_path)
+    if not valid_name(name) or os.path.abspath(pid_or_path) != os.path.join(os.path.abspath(directory), name):
+        return False
+    fd, _ = open_directory(directory)
+    try:
+        info = os.lstat(name, dir_fd=fd)
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            return False
+        os.unlink(name, dir_fd=fd)
+        return True
+    except:
+        return False
+    finally:
+        os.close(fd)
+
+try:
+    success = create() if operation == "create" else remove() if operation == "remove" else False
+except:
+    success = False
+sys.exit(0 if success else 1)
+`;
+
+function invoke(args) {
+  return new Promise((resolvePromise) => {
+    const child = spawn("python3", ["-c", helper, approvedAncestorSymlinks.join("\x1f"), ...args], {
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk;
+    });
+    child.on("error", () => resolvePromise(null));
+    child.on("close", (code) => resolvePromise(code === 0 ? stdout : null));
+  });
 }
 
 const [operation, ...args] = process.argv.slice(2);
-const success =
+const output =
   operation === "create" && args.length === 3
-    ? await create(args[0], args[1], args[2])
+    ? await invoke([operation, ...args])
     : operation === "remove" && args.length === 2
-      ? await remove(args[0], args[1])
-      : false;
-process.exitCode = success ? 0 : 1;
+      ? await invoke([operation, args[0], "", args[1]])
+      : null;
+if (output === null) process.exitCode = 1;
+else if (operation === "create") process.stdout.write(output);

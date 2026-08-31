@@ -323,11 +323,14 @@ test("real Pi bash integration reuses cache and preserves every namespace/lifecy
         return false;
       }
     });
+    const exited = new Promise((resolvePromise) => sleeper.once("exit", resolvePromise));
+    const closed = new Promise((resolvePromise) => sleeper.once("close", resolvePromise));
     sleeper.kill("SIGKILL");
-    await new Promise((resolvePromise) => sleeper.on("close", resolvePromise));
+    await exited;
     result = await cli(["clean", "--project", projectA], projectA, env);
     assert.equal(result.code, 2, result.stderr, "compiler-owned lease must protect cleanup after parent interruption");
     await writeFile(compilerRelease, "release\n");
+    await closed;
     await waitFor(async () => {
       try {
         return !(await readdir(leasesDir)).some((entry) => /\.[1-9][0-9]*\.json$/.test(entry));
