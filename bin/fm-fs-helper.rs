@@ -3,6 +3,7 @@ use std::ffi::CString;
 use std::io::{Read, Write};
 use std::os::raw::{c_char, c_int};
 use std::os::unix::io::RawFd;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[repr(C)]
 struct Stat {
@@ -20,7 +21,14 @@ extern "C" {
     fn ftruncate(fd: c_int, length: i64) -> c_int;
     fn flock(fd: c_int, operation: c_int) -> c_int;
     fn mkdirat(fd: c_int, path: *const c_char, mode: u32) -> c_int;
+    fn unlinkat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
+    fn getpid() -> c_int;
     fn geteuid() -> u32;
+}
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn renameat2(oldfd: c_int, old: *const c_char, newfd: c_int, new: *const c_char, flags: u32) -> c_int;
 }
 
 const O_RDONLY: c_int = 0;
@@ -29,6 +37,9 @@ const O_NOFOLLOW: c_int = 0o400000;
 const O_RDWR: c_int = 0o2;
 const O_CREAT: c_int = 0o100;
 const LOCK_EX: c_int = 2;
+#[cfg(target_os = "linux")]
+const RENAME_NOREPLACE: u32 = 1;
+const AT_REMOVEDIR: c_int = 0x200;
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
@@ -94,6 +105,38 @@ fn open_bound_parent(path: &str, parent_device: &str, parent_inode: &str) -> Res
     Ok((parent, name.to_string()))
 }
 
+static QUARANTINE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(target_os = "linux")]
+fn rename_noreplace(parent: RawFd, old: *const c_char, new: *const c_char) -> c_int {
+    unsafe { renameat2(parent, old, parent, new, RENAME_NOREPLACE) }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn rename_noreplace(_: RawFd, _: *const c_char, _: *const c_char) -> c_int { -1 }
+
+fn quarantine(parent: RawFd, name: &str) -> Result<String, String> {
+    let old = cstring(name)?;
+    for _ in 0..64 {
+        let candidate = format!(".fm-quarantine-{}-{}", unsafe { getpid() }, QUARANTINE_COUNTER.fetch_add(1, Ordering::Relaxed));
+        let new = cstring(&candidate)?;
+        if rename_noreplace(parent, old.as_ptr(), new.as_ptr()) == 0 { return Ok(candidate); }
+    }
+    Err("cannot quarantine child".to_string())
+}
+
+fn restore(parent: RawFd, quarantine_name: &str, name: &str) {
+    if let (Ok(old), Ok(new)) = (cstring(quarantine_name), cstring(name)) {
+        rename_noreplace(parent, old.as_ptr(), new.as_ptr());
+    }
+}
+
+fn unlink_child(parent: RawFd, name: &str, flags: c_int) -> Result<(), String> {
+    let name = cstring(name)?;
+    if unsafe { unlinkat(parent, name.as_ptr(), flags) } != 0 { return Err("cannot remove quarantined child".to_string()); }
+    Ok(())
+}
+
 fn hold_lock(path: &str, parent_device: &str, parent_inode: &str, token: &str) -> Result<(), String> {
     if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) { return Err("invalid token".to_string()); }
     let (parent, name) = open_bound_parent(path, parent_device, parent_inode)?;
@@ -134,13 +177,30 @@ fn remove_tree_fd(fd: RawFd) -> Result<(), String> {
         let directory = open_child(fd, &name, O_RDONLY | O_DIRECTORY);
         match directory {
             Ok(child) => {
-                let result = (|| { owned_directory(child)?; remove_tree_fd(child) })();
+                let result = (|| {
+                    let identity = owned_directory(child)?;
+                    let quarantined = quarantine(fd, &name)?;
+                    let staged = open_child(fd, &quarantined, O_RDONLY | O_DIRECTORY)?;
+                    let staged_identity = owned_directory(staged)?;
+                    if staged_identity.st_dev != identity.st_dev || staged_identity.st_ino != identity.st_ino { unsafe { close(staged); } restore(fd, &quarantined, &name); return Err("identity changed".to_string()); }
+                    let result = remove_tree_fd(staged).and_then(|_| unlink_child(fd, &quarantined, AT_REMOVEDIR));
+                    unsafe { close(staged); }
+                    result
+                })();
                 unsafe { close(child); }
                 result?;
             }
             Err(_) => {
                 let child = open_child(fd, &name, O_RDWR)?;
-                let result = (|| { owned_file(child)?; if unsafe { ftruncate(child, 0) } != 0 { return Err("cannot clear file".to_string()); } Ok(()) })();
+                let result = (|| {
+                    let identity = owned_file(child)?;
+                    let quarantined = quarantine(fd, &name)?;
+                    let staged = open_child(fd, &quarantined, O_RDONLY)?;
+                    let staged_identity = owned_file(staged)?;
+                    unsafe { close(staged); }
+                    if staged_identity.st_dev != identity.st_dev || staged_identity.st_ino != identity.st_ino { restore(fd, &quarantined, &name); return Err("identity changed".to_string()); }
+                    unlink_child(fd, &quarantined, 0)
+                })();
                 unsafe { close(child); }
                 result?;
             }
@@ -154,8 +214,15 @@ fn remove_tree(path: &str, parent_device: &str, parent_inode: &str, device: &str
     let result = (|| {
         let directory = open_child(parent, &name, O_RDONLY | O_DIRECTORY)?;
         let result = (|| {
-            if !matches_identity(&owned_directory(directory)?, device, inode) { return Err("identity changed".to_string()); }
-            remove_tree_fd(directory)
+            let identity = owned_directory(directory)?;
+            if !matches_identity(&identity, device, inode) { return Err("identity changed".to_string()); }
+            let quarantined = quarantine(parent, &name)?;
+            let staged = open_child(parent, &quarantined, O_RDONLY | O_DIRECTORY)?;
+            let staged_identity = owned_directory(staged)?;
+            if staged_identity.st_dev != identity.st_dev || staged_identity.st_ino != identity.st_ino { unsafe { close(staged); } restore(parent, &quarantined, &name); return Err("identity changed".to_string()); }
+            let result = remove_tree_fd(staged).and_then(|_| unlink_child(parent, &quarantined, AT_REMOVEDIR));
+            unsafe { close(staged); }
+            result
         })();
         unsafe { close(directory); }
         result
@@ -169,9 +236,14 @@ fn remove_file(path: &str, parent_device: &str, parent_inode: &str, device: &str
     let result = (|| {
         let file = open_child(parent, &name, O_RDWR)?;
         let result = (|| {
-            if !matches_identity(&owned_file(file)?, device, inode) { return Err("identity changed".to_string()); }
-            if unsafe { ftruncate(file, 0) } != 0 { return Err("cannot clear file".to_string()); }
-            Ok(())
+            let identity = owned_file(file)?;
+            if !matches_identity(&identity, device, inode) { return Err("identity changed".to_string()); }
+            let quarantined = quarantine(parent, &name)?;
+            let staged = open_child(parent, &quarantined, O_RDONLY)?;
+            let staged_identity = owned_file(staged)?;
+            unsafe { close(staged); }
+            if staged_identity.st_dev != identity.st_dev || staged_identity.st_ino != identity.st_ino { restore(parent, &quarantined, &name); return Err("identity changed".to_string()); }
+            unlink_child(parent, &quarantined, 0)
         })();
         unsafe { close(file); }
         result
