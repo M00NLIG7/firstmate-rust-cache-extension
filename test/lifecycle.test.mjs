@@ -262,6 +262,67 @@ test("clean preserves a namespace when its leases directory identity changes", {
   }
 });
 
+test("clean refuses a replaced namespace without deleting either directory", { skip: process.platform !== "linux" }, async () => {
+  const root = await temporaryRoot("namespace replacement");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/namespace-replacement.git");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\necho 'sccache 0.17.0'\n");
+    const env = await makeEnvironment(root, backend);
+    let result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+    const plan = await prepareExecution(project, env);
+    assert.equal(plan.state, "ready");
+
+    const preserved = join(root, "preserved namespace");
+    const state = await readFile(plan.namespace.stateFile, "utf8");
+    await rename(plan.namespace.namespaceDir, preserved);
+    await mkdir(join(plan.namespace.namespaceDir, "leases"), { recursive: true, mode: 0o700 });
+    await writeFile(plan.namespace.stateFile, state, { mode: 0o600 });
+    await writeFile(join(plan.namespace.namespaceDir, "must-survive"), "replacement sentinel\n", { mode: 0o600 });
+
+    result = await cli(["clean", "--project", project], project, env);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /namespace directory identity changed/);
+    assert.equal(await readFile(join(plan.namespace.namespaceDir, "must-survive"), "utf8"), "replacement sentinel\n");
+    await stat(join(preserved, "leases"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("uninstall preserves a replaced cache root", { skip: process.platform !== "linux" }, async () => {
+  const root = await temporaryRoot("cache root replacement");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/cache-root-replacement.git");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\necho 'sccache 0.17.0'\n");
+    const env = await makeEnvironment(root, backend);
+    let result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+    const plan = await prepareExecution(project, env);
+    assert.equal(plan.state, "ready");
+
+    const marker = await readFile(join(env.FIRSTMATE_RUST_CACHE_CACHE_DIR, ".firstmate-rust-cache-root.json"), "utf8");
+    const preserved = join(root, "preserved cache");
+    await rename(env.FIRSTMATE_RUST_CACHE_CACHE_DIR, preserved);
+    await mkdir(env.FIRSTMATE_RUST_CACHE_CACHE_DIR, { recursive: true, mode: 0o700 });
+    await writeFile(join(env.FIRSTMATE_RUST_CACHE_CACHE_DIR, ".firstmate-rust-cache-root.json"), marker, { mode: 0o600 });
+    await writeFile(join(env.FIRSTMATE_RUST_CACHE_CACHE_DIR, "must-survive"), "replacement sentinel\n", { mode: 0o600 });
+
+    result = await cli(["uninstall", "--remove-cache"], project, env);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /cache root ownership marker is invalid/);
+    assert.equal(
+      await readFile(join(env.FIRSTMATE_RUST_CACHE_CACHE_DIR, "must-survive"), "utf8"),
+      "replacement sentinel\n",
+    );
+    await stat(join(preserved, "namespaces"));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("clean refuses a symlinked runtime ancestor without touching foreign sockets", async () => {
   const root = await temporaryRoot("runtime symlink");
   try {
