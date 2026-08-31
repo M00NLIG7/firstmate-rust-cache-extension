@@ -1,9 +1,5 @@
 #!/bin/sh
 # Fail-open Cargo RUSTC_WRAPPER for Firstmate Rust Cache.
-# README.md owns cache identity and correctness boundaries; this file owns only
-# the direct invocation mechanics. On every wrapper/backend ambiguity or failure,
-# it execs Cargo's original compiler command and discards backend diagnostics.
-
 set -u
 
 compiler=${1-}
@@ -13,46 +9,4 @@ if [ -z "$compiler" ] || [ -z "$backend" ] || [ ! -x "$backend" ]; then
   exec "$@"
 fi
 
-scratch=${TMPDIR:-/tmp}
-out=$(mktemp "$scratch/fm-rust-cache.stdout.XXXXXX") || exec "$@"
-err=$(mktemp "$scratch/fm-rust-cache.stderr.XXXXXX") || {
-  rm -f -- "$out"
-  exec "$@"
-}
-
-cleanup() {
-  rm -f -- "$out" "$err"
-}
-interrupted() {
-  cleanup
-  exit 130
-}
-terminated() {
-  cleanup
-  exit 143
-}
-hungup() {
-  cleanup
-  exit 129
-}
-trap cleanup EXIT
-trap hungup HUP
-trap terminated TERM
-trap interrupted INT
-
-if "$backend" "$@" >"$out" 2>"$err"; then
-  status=0
-  cat "$out"
-  cat "$err" >&2
-  cleanup
-  trap - EXIT HUP TERM INT
-  exit "$status"
-fi
-
-# A cache miss never reaches this branch: sccache invokes rustc on a miss. A
-# nonzero status can be a backend problem or an ordinary compiler failure. Run
-# rustc directly in both cases so cache health cannot block the build and only
-# ordinary rustc diagnostics reach the caller.
-cleanup
-trap - EXIT HUP TERM INT
-exec "$@"
+exec "$backend" "$@"

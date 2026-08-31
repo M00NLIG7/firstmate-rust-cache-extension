@@ -309,7 +309,8 @@ test("real Pi bash integration reuses cache and preserves every namespace/lifecy
     result = await cli(["uninstall", "--remove-cache"], projectB, env);
     assert.equal(result.code, 0, result.stderr);
     await assert.rejects(stat(cacheRoot), { code: "ENOENT" });
-    assert.equal(await readFile(join(projectB, "src", "lib.rs"), "utf8").then((text) => text.includes("answer")), true);
+    result = await cli(["run", "--", "cargo", "build", "--lib"], projectB, env);
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
     assert.equal(await readFile(join(env.CARGO_HOME, "registry", "must-survive"), "utf8"), "registry\n");
     assert.equal(await readFile(join(foreignState, "must-survive"), "utf8"), "foreign\n");
   } finally {

@@ -141,12 +141,13 @@ cannot silently select a remote backend. If `RUSTC_WRAPPER`,
 `CARGO_INCREMENTAL` already exists, it leaves the command untouched rather than
 combining unknown wrappers, remote caches, credentials, or compilation modes.
 
-The fail-open wrapper first asks sccache to run Cargo's exact rustc invocation.
-If sccache exits nonzero for any reason, its diagnostics are discarded and the
-original rustc command runs directly; cache health cannot block a build or
-replace ordinary compiler output. Missing/old/unhealthy backends, unsupported
-platforms/projects, unsafe state, lock contention, and overlong socket paths also
-run Pi's ordinary bash tool unchanged.
+The fail-open wrapper runs Cargo's original compiler command directly when
+sccache is unavailable before compiler execution starts. Once it starts
+sccache, sccache owns that one compiler invocation and its result is returned
+unchanged; the wrapper never replays a command after execution begins.
+Missing/old/unhealthy backends, unsupported platforms/projects, unsafe state,
+lock contention, and overlong socket paths are detected before launch and run
+Pi's ordinary bash tool unchanged.
 
 The selected environment sets `CARGO_INCREMENTAL=0`, the standard sccache
 requirement; this changes Cargo's compilation strategy but not the requested
@@ -156,8 +157,7 @@ that read undeclared filesystem inputs may not be tracked correctly. Enable only
 repositories whose build scripts/procedural macros are
 deterministic from declared source and environment. This package does not claim
 to sandbox hostile build code or make an unsound upstream cache key sound. A
-compiler error may be compiled twice because fail-open cannot safely distinguish
-an ordinary rustc failure from backend failure before rerunning rustc directly.
+compiler error is returned from its single sccache-owned invocation.
 
 ## Limits, retention, status, and cleanup
 
