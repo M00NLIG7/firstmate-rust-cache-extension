@@ -57,7 +57,13 @@ test("a failed compiler invoked through sccache is not replayed", async () => {
     assert.equal(result.code, 19, result.stderr);
     assert.equal(result.stderr, "compiler failed\n");
     assert.equal(await readFile(invocations, "utf8"), supportsPinnedLeases ? "backend\ncompiler\n" : "compiler\n");
-    assert.deepEqual(await readdir(leases), []);
+    const releasedLeases = await readdir(leases);
+    if (supportsPinnedLeases) {
+      assert.equal(releasedLeases.length, 1);
+      assert.equal(await readFile(join(leases, releasedLeases[0]), "utf8"), "");
+    } else {
+      assert.deepEqual(releasedLeases, []);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

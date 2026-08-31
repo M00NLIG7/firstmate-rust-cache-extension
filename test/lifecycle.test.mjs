@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -74,7 +74,7 @@ test("enable/disable are idempotent and backend absence runs an ordinary Cargo b
   }
 });
 
-test("configuration mutations release their private lock directory", async () => {
+test("configuration mutations reuse their private lock directory", { skip: process.platform !== "linux" }, async () => {
   const root = await temporaryRoot("configuration lock release");
   try {
     const project = await createProject(root, "project", "git@github.com:example/configuration-lock.git");
@@ -87,14 +87,27 @@ test("configuration mutations release their private lock directory", async () =>
     ]) {
       const result = await cli(command, project, env);
       assert.equal(result.code, 0, result.stderr);
-      await assert.rejects(stat(paths.configLock), { code: "ENOENT" });
-      const siblings = await readdir(dirname(paths.configDir));
-      assert.equal(
-        siblings.some((name) => name.startsWith(`${basename(paths.configDir)}.config.lock.`)),
-        false,
-        "configuration mutations must not retain released lock directories",
-      );
+      await stat(join(paths.configLock, "owner.json"));
     }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent configuration mutations retain both selections", { skip: process.platform !== "linux" }, async () => {
+  const root = await temporaryRoot("concurrent configuration mutations");
+  try {
+    const first = await createProject(root, "first", "git@github.com:example/concurrent-first.git");
+    const second = await createProject(root, "second", "git@github.com:example/concurrent-second.git");
+    const env = await makeEnvironment(root, null);
+    const [firstResult, secondResult] = await Promise.all([
+      cli(["enable", "--project", first, "--max-size", "8MiB"], first, env),
+      cli(["enable", "--project", second, "--max-size", "8MiB"], second, env),
+    ]);
+    assert.equal(firstResult.code, 0, firstResult.stderr);
+    assert.equal(secondResult.code, 0, secondResult.stderr);
+    const config = JSON.parse(await readFile(join(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR, "config.json"), "utf8"));
+    assert.equal(config.projects.length, 2);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

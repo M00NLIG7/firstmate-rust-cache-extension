@@ -1,8 +1,8 @@
 use std::env;
 use std::ffi::CString;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::os::raw::{c_char, c_int};
-use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
+use std::os::unix::io::RawFd;
 
 #[repr(C)]
 struct Stat {
@@ -16,15 +16,19 @@ extern "C" {
     fn close(fd: c_int) -> c_int;
     fn fstat(fd: c_int, stat: *mut Stat) -> c_int;
     fn open(path: *const c_char, flags: c_int) -> c_int;
-    fn openat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
-    fn unlinkat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
+    fn openat(fd: c_int, path: *const c_char, flags: c_int, mode: u32) -> c_int;
+    fn ftruncate(fd: c_int, length: i64) -> c_int;
+    fn flock(fd: c_int, operation: c_int) -> c_int;
+    fn mkdirat(fd: c_int, path: *const c_char, mode: u32) -> c_int;
     fn geteuid() -> u32;
 }
 
 const O_RDONLY: c_int = 0;
 const O_DIRECTORY: c_int = 0o200000;
 const O_NOFOLLOW: c_int = 0o400000;
-const AT_REMOVEDIR: c_int = 0x200;
+const O_RDWR: c_int = 0o2;
+const O_CREAT: c_int = 0o100;
+const LOCK_EX: c_int = 2;
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
 const S_IFREG: u32 = 0o100000;
@@ -59,7 +63,7 @@ fn open_directory(path: &str) -> Result<RawFd, String> {
     for component in path.split('/').filter(|part| !part.is_empty()) {
         if component == "." || component == ".." { unsafe { close(fd); } return Err("unsafe path".to_string()); }
         let component = cstring(component)?;
-        let next = unsafe { openat(fd, component.as_ptr(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW) };
+        let next = unsafe { openat(fd, component.as_ptr(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW, 0) };
         unsafe { close(fd); }
         if next < 0 { return Err("cannot open directory".to_string()); }
         fd = next;
@@ -78,15 +82,9 @@ fn split_path(path: &str) -> Result<(&str, &str), String> {
 
 fn open_child(parent: RawFd, name: &str, flags: c_int) -> Result<RawFd, String> {
     let name = cstring(name)?;
-    let child = unsafe { openat(parent, name.as_ptr(), flags | O_NOFOLLOW) };
+    let child = unsafe { openat(parent, name.as_ptr(), flags | O_NOFOLLOW, 0) };
     if child < 0 { return Err("cannot open child".to_string()); }
     Ok(child)
-}
-
-fn unlink_child(parent: RawFd, name: &str, flags: c_int) -> Result<(), String> {
-    let name = cstring(name)?;
-    if unsafe { unlinkat(parent, name.as_ptr(), flags) } != 0 { return Err("cannot remove child".to_string()); }
-    Ok(())
 }
 
 fn open_bound_parent(path: &str, parent_device: &str, parent_inode: &str) -> Result<(RawFd, String), String> {
@@ -96,33 +94,30 @@ fn open_bound_parent(path: &str, parent_device: &str, parent_inode: &str) -> Res
     Ok((parent, name.to_string()))
 }
 
-fn owner_matches(fd: RawFd, token: &str) -> Result<bool, String> {
-    let owner = open_child(fd, "owner.json", O_RDONLY)?;
-    let result = (|| {
-        owned_file(owner)?;
-        let mut file = unsafe { std::fs::File::from_raw_fd(owner) };
-        let mut contents = String::new();
-        let read = file.read_to_string(&mut contents);
-        let owner = file.into_raw_fd();
-        read.map_err(|_| "cannot read owner".to_string())?;
-        Ok((contents.contains(&format!("\"token\":\"{}\"", token)), owner))
-    })();
-    match result {
-        Ok((matched, owner)) => { unsafe { close(owner); } Ok(matched) }
-        Err(error) => { unsafe { close(owner); } Err(error) }
-    }
-}
-
-fn release_lock(path: &str, parent_device: &str, parent_inode: &str, device: &str, inode: &str, token: &str) -> Result<(), String> {
+fn hold_lock(path: &str, parent_device: &str, parent_inode: &str, token: &str) -> Result<(), String> {
     if token.len() != 32 || !token.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()) { return Err("invalid token".to_string()); }
     let (parent, name) = open_bound_parent(path, parent_device, parent_inode)?;
     let result = (|| {
+        let name_c = cstring(&name)?;
+        unsafe { mkdirat(parent, name_c.as_ptr(), 0o700); }
         let lock = open_child(parent, &name, O_RDONLY | O_DIRECTORY)?;
         let result = (|| {
-            if !matches_identity(&owned_directory(lock)?, device, inode) { return Err("identity changed".to_string()); }
-            if !owner_matches(lock, token)? { return Err("identity changed".to_string()); }
-            unlink_child(lock, "owner.json", 0)?;
-            unlink_child(parent, &name, AT_REMOVEDIR)
+            owned_directory(lock)?;
+            let owner_name = cstring("owner.json")?;
+            let owner = unsafe { openat(lock, owner_name.as_ptr(), O_RDWR | O_CREAT | O_NOFOLLOW, 0o600) };
+            if owner < 0 { return Err("cannot open lock owner".to_string()); }
+            let result = (|| {
+                owned_file(owner)?;
+                if unsafe { flock(owner, LOCK_EX) } != 0 { return Err("cannot lock owner".to_string()); }
+                if unsafe { ftruncate(owner, 0) } != 0 { return Err("cannot publish lock".to_string()); }
+                writeln!(std::io::stdout(), "locked:{}", token).map_err(|_| "cannot publish lock".to_string())?;
+                std::io::stdout().flush().map_err(|_| "cannot publish lock".to_string())?;
+                let mut input = String::new();
+                std::io::stdin().read_to_string(&mut input).map_err(|_| "cannot wait for lock release".to_string())?;
+                Ok(())
+            })();
+            unsafe { close(owner); }
+            result
         })();
         unsafe { close(lock); }
         result
@@ -139,13 +134,13 @@ fn remove_tree_fd(fd: RawFd) -> Result<(), String> {
         let directory = open_child(fd, &name, O_RDONLY | O_DIRECTORY);
         match directory {
             Ok(child) => {
-                let result = (|| { owned_directory(child)?; remove_tree_fd(child)?; unlink_child(fd, &name, AT_REMOVEDIR) })();
+                let result = (|| { owned_directory(child)?; remove_tree_fd(child) })();
                 unsafe { close(child); }
                 result?;
             }
             Err(_) => {
-                let child = open_child(fd, &name, O_RDONLY)?;
-                let result = (|| { owned_file(child)?; unlink_child(fd, &name, 0) })();
+                let child = open_child(fd, &name, O_RDWR)?;
+                let result = (|| { owned_file(child)?; if unsafe { ftruncate(child, 0) } != 0 { return Err("cannot clear file".to_string()); } Ok(()) })();
                 unsafe { close(child); }
                 result?;
             }
@@ -160,8 +155,7 @@ fn remove_tree(path: &str, parent_device: &str, parent_inode: &str, device: &str
         let directory = open_child(parent, &name, O_RDONLY | O_DIRECTORY)?;
         let result = (|| {
             if !matches_identity(&owned_directory(directory)?, device, inode) { return Err("identity changed".to_string()); }
-            remove_tree_fd(directory)?;
-            unlink_child(parent, &name, AT_REMOVEDIR)
+            remove_tree_fd(directory)
         })();
         unsafe { close(directory); }
         result
@@ -173,27 +167,13 @@ fn remove_tree(path: &str, parent_device: &str, parent_inode: &str, device: &str
 fn remove_file(path: &str, parent_device: &str, parent_inode: &str, device: &str, inode: &str) -> Result<(), String> {
     let (parent, name) = open_bound_parent(path, parent_device, parent_inode)?;
     let result = (|| {
-        let file = open_child(parent, &name, O_RDONLY)?;
+        let file = open_child(parent, &name, O_RDWR)?;
         let result = (|| {
             if !matches_identity(&owned_file(file)?, device, inode) { return Err("identity changed".to_string()); }
-            unlink_child(parent, &name, 0)
+            if unsafe { ftruncate(file, 0) } != 0 { return Err("cannot clear file".to_string()); }
+            Ok(())
         })();
         unsafe { close(file); }
-        result
-    })();
-    unsafe { close(parent); }
-    result
-}
-
-fn remove_empty_directory(path: &str, parent_device: &str, parent_inode: &str, device: &str, inode: &str) -> Result<(), String> {
-    let (parent, name) = open_bound_parent(path, parent_device, parent_inode)?;
-    let result = (|| {
-        let directory = open_child(parent, &name, O_RDONLY | O_DIRECTORY)?;
-        let result = (|| {
-            if !matches_identity(&owned_directory(directory)?, device, inode) { return Err("identity changed".to_string()); }
-            unlink_child(parent, &name, AT_REMOVEDIR)
-        })();
-        unsafe { close(directory); }
         result
     })();
     unsafe { close(parent); }
@@ -204,10 +184,9 @@ fn main() {
     let args: Vec<String> = env::args().collect();
     let result = match args.as_slice() {
         [_, command] if command == "probe" => Ok(()),
-        [_, command, path, parent_device, parent_inode, device, inode, token] if command == "release-lock" => release_lock(path, parent_device, parent_inode, device, inode, token),
+        [_, command, path, parent_device, parent_inode, token] if command == "hold-lock" => hold_lock(path, parent_device, parent_inode, token),
         [_, command, path, parent_device, parent_inode, device, inode] if command == "remove-tree" => remove_tree(path, parent_device, parent_inode, device, inode),
         [_, command, path, parent_device, parent_inode, device, inode] if command == "remove-file" => remove_file(path, parent_device, parent_inode, device, inode),
-        [_, command, path, parent_device, parent_inode, device, inode] if command == "remove-empty-directory" => remove_empty_directory(path, parent_device, parent_inode, device, inode),
         _ => Err("invalid arguments".to_string()),
     };
     if let Err(message) = result { eprintln!("{}", message); std::process::exit(1); }

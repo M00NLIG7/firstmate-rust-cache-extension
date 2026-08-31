@@ -119,3 +119,46 @@ test("filesystem helper refuses a replacement parent", { skip: process.platform 
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("filesystem helper retains cleared files and recovers an interrupted lock holder", { skip: process.platform !== "linux" }, async () => {
+  const root = await temporaryRoot("filesystem helper recovery");
+  try {
+    const helper = join(root, "fm-fs-helper");
+    let result = await run("rustc", [helperSource.pathname, "--edition=2021", "-O", "-o", helper]);
+    assert.equal(result.code, 0, result.stderr);
+    const parentIdentity = await stat(root, { bigint: true });
+    const file = join(root, "owned");
+    await writeFile(file, "cache-data\n", { mode: 0o600 });
+    const fileIdentity = await stat(file, { bigint: true });
+    result = await run(helper, [
+      "remove-file",
+      file,
+      String(parentIdentity.dev),
+      String(parentIdentity.ino),
+      String(fileIdentity.dev),
+      String(fileIdentity.ino),
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    assert.equal(await readFile(file, "utf8"), "");
+
+    const lock = join(root, "lock");
+    const startHolder = () => spawn(helper, [
+      "hold-lock",
+      lock,
+      String(parentIdentity.dev),
+      String(parentIdentity.ino),
+      "0123456789abcdef0123456789abcdef",
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+    const first = startHolder();
+    await new Promise((resolvePromise) => first.stdout.once("data", resolvePromise));
+    first.kill("SIGKILL");
+    await new Promise((resolvePromise) => first.once("close", resolvePromise));
+    const second = startHolder();
+    await new Promise((resolvePromise) => second.stdout.once("data", resolvePromise));
+    second.stdin.end();
+    const code = await new Promise((resolvePromise) => second.once("close", resolvePromise));
+    assert.equal(code, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
