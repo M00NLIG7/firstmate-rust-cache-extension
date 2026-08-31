@@ -138,7 +138,7 @@ test("symlinked state-root ancestors are refused before creating package state",
     assert.equal(result.code, 0, result.stderr);
     const activation = await prepareExecution(project, env);
     assert.equal(activation.state, "bypass");
-    assert.equal(activation.reason, "unsafe-state");
+    assert.equal(activation.reason, process.platform === "linux" ? "unsafe-state" : "unsupported-platform");
     assert.equal(await readFile(join(foreign, "must-survive"), "utf8"), "sentinel\n");
     assert.deepEqual(await readdir(foreign), ["must-survive"]);
 
@@ -198,7 +198,7 @@ test("run bypasses shell and foreign Cargo manifest commands", async () => {
   }
 });
 
-test("clean refuses a symlinked lease directory without touching foreign leases", async () => {
+test("clean refuses a symlinked lease directory without touching foreign leases", { skip: process.platform !== "linux" }, async () => {
   const root = await temporaryRoot("lease symlink");
   try {
     const project = await createProject(root, "project", "git@github.com:example/lease-symlink.git");
@@ -252,7 +252,7 @@ test("clean refuses a symlinked runtime ancestor without touching foreign socket
   }
 });
 
-test("a prepared activation bypasses after concurrent cache removal", async () => {
+test("a prepared activation bypasses after concurrent cache removal", { skip: process.platform !== "linux" }, async () => {
   const root = await temporaryRoot("activation race");
   try {
     const project = await createProject(root, "project", "git@github.com:example/activation-race.git");

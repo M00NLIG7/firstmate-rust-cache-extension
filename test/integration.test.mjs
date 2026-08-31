@@ -83,7 +83,7 @@ function replaceProcessEnv(next) {
   };
 }
 
-test("real Pi bash integration reuses cache and preserves every namespace/lifecycle boundary", { timeout: 120_000 }, async () => {
+test("real Pi bash integration reuses cache and preserves every namespace/lifecycle boundary", { skip: process.platform !== "linux", timeout: 120_000 }, async () => {
   const sccache = await findSccache();
   assert.ok(sccache, "sccache 0.17+ is required for the behavioral integration suite");
   const root = await temporaryRoot("real integration");

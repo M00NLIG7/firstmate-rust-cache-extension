@@ -75,7 +75,33 @@ test("installation is inert until an explicit project/workload selection exists"
   }
 });
 
-test("an unselected Pi session leaves expired selected cache state untouched", async () => {
+test("unsupported platforms run selected Cargo builds ordinarily without cache state", { skip: process.platform === "linux" }, async () => {
+  const root = await temporaryRoot("platform fallback");
+  try {
+    const project = await createProject(root, "selected", "git@github.com:example/platform-fallback.git");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'sccache 0.17.0'; fi\n");
+    const env = await makeEnvironment(root, backend);
+    let result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+
+    result = await cli(["status", "--project", project, "--json"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+    const activation = JSON.parse(result.stdout);
+    assert.equal(activation.state, "bypass");
+    assert.equal(activation.reason, "unsupported-platform");
+
+    result = await cli(["run", "--", "cargo", "build", "--lib"], project, env);
+    assert.equal(result.code, 0, `${result.stdout}\n${result.stderr}`);
+    assert.match(result.stderr, /unsupported-platform/);
+    await stat(join(project, "target", "debug"));
+    await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an unselected Pi session leaves expired selected cache state untouched", { skip: process.platform !== "linux" }, async () => {
   const root = await temporaryRoot("unselected session");
   try {
     const selected = await createProject(root, "selected", "git@github.com:example/selected.git");

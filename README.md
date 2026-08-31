@@ -31,7 +31,7 @@ unchanged so a selected namespace cannot cross an unselected working directory.
 
 ## Requirements
 
-- Linux with procfs for cacheable compiler launches; other platforms run selected Cargo commands uncached
+- Linux with procfs for cacheable compiler launches; macOS and other unsupported platforms report `unsupported-platform` and run selected Cargo commands uncached without creating cache state
 - Node.js 20 or newer
 - Pi >=0.84.0 <0.85.0 (the tested public extension contract)
 - Rust/Cargo
@@ -185,7 +185,7 @@ allocations fit:
 sccache receives each namespace maximum minus a 256 KiB reserve for the owned
 state/config files, so backend artifacts plus namespace metadata remain inside
 the configured allocation. Retention defaults to 30 days and is
-applied without a monitor at Pi session start and by explicit `gc`; an in-use
+applied without a monitor at Pi session start for a ready selection and by explicit `gc`; an in-use
 namespace is skipped. `disable` is idempotent and preserves data:
 
 ```text
@@ -278,9 +278,10 @@ Tests use disposable homes and repositories and make no provider or LLM calls:
 npm ci
 npm run check
 npm test
+npm run test:platform-fallback
 ```
 
-The integration suite requires sccache 0.17+ and runs real Cargo/rustc commands.
+Run `npm test` on Linux: its integration suite requires sccache 0.17+ and runs real Cargo/rustc commands. Run `npm run test:platform-fallback` on macOS to exercise ordinary-build fallback without cache mutation.
 It covers default inertness, opt-in, repeat hits, project/flag/feature separation,
 backend absence, limits and targeted cleanup, idempotence, spaces, concurrency,
 interruption, and uninstall preservation.

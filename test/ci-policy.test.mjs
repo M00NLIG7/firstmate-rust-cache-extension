@@ -48,4 +48,6 @@ test("CI workflow uses reviewed immutable execution inputs", async () => {
     "rustup toolchain install 1.85.0 --profile minimal",
     "rustup default 1.86.0",
   ]);
+  assert.equal(step(linux, "Behavioral tests").run, "npm test");
+  assert.equal(step(macos, "Behavioral tests").run, "npm run test:platform-fallback");
 });

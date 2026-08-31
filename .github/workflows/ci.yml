@@ -65,4 +65,4 @@ jobs:
       - name: Static checks
         run: npm run check
       - name: Behavioral tests
-        run: npm test
+        run: npm run test:platform-fallback
