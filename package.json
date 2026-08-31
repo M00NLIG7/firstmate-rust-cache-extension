@@ -31,7 +31,7 @@
     ]
   },
   "scripts": {
-    "check": "node --check lib/core.mjs && node --check lib/admin.mjs && node --check extensions/firstmate-rust-cache.mjs && node --check bin/firstmate-rust-cache.mjs && shellcheck bin/fm-rustc-wrapper",
+    "check": "node --check lib/core.mjs && node --check lib/admin.mjs && node --check extensions/firstmate-rust-cache.mjs && node --check bin/firstmate-rust-cache.mjs && node --check bin/fm-rustc-lease.mjs && shellcheck bin/fm-rustc-wrapper",
     "test": "node --test test/*.test.mjs",
     "test:integration": "node --test test/integration.test.mjs"
   },

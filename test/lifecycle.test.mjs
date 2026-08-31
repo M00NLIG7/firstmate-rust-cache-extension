@@ -227,6 +227,31 @@ test("clean refuses a symlinked lease directory without touching foreign leases"
   }
 });
 
+test("clean refuses a symlinked runtime ancestor without touching foreign sockets", async () => {
+  const root = await temporaryRoot("runtime symlink");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/runtime-symlink.git");
+    const foreign = join(root, "foreign runtime");
+    const link = join(root, "runtime link");
+    await mkdir(join(foreign, "runtime"), { recursive: true, mode: 0o700 });
+    await symlink(foreign, link);
+    const env = await makeEnvironment(root, null);
+    env.FIRSTMATE_RUST_CACHE_RUNTIME_DIR = join(link, "runtime");
+    let result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+    const selected = await status(project, env);
+    const socket = join(foreign, "runtime", `${selected.namespace.slice(0, 24)}.sock`);
+    await writeFile(socket, "socket sentinel\n", { mode: 0o600 });
+
+    result = await cli(["clean", "--project", project], project, env);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /symlinked|unsafe-state/);
+    assert.equal(await readFile(socket, "utf8"), "socket sentinel\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a prepared activation bypasses after concurrent cache removal", async () => {
   const root = await temporaryRoot("activation race");
   try {

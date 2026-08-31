@@ -17,19 +17,20 @@ case "$lease_token" in
     case "$lease_token" in
       *[!0123456789abcdef]*) exec "$@" ;;
     esac
-    if [ -z "$lease_dir" ] || [ ! -d "$lease_dir" ]; then exec "$@"; fi
-    lease_path="$lease_dir/$lease_token.$$.json"
-    (umask 077; set -C; : > "$lease_path") 2>/dev/null || exec "$@"
-    printf '{"pid":%s,"token":"%s","created_at":"%s"}\n' "$$" "$lease_token" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$lease_path" || {
-      rm -f -- "$lease_path"
-      exec "$@"
-    }
+    lease_helper=$(
+      CDPATH=''
+      export CDPATH
+      cd -- "$(dirname -- "$0")" && pwd -P
+    )/fm-rustc-lease.mjs || exec "$@"
+    [ -r "$lease_helper" ] || exec "$@"
+    lease_path=$(node "$lease_helper" create "$lease_dir" "$lease_token" "$$" 2>/dev/null) || exec "$@"
+    [ -n "$lease_path" ] || exec "$@"
     ;;
   *) exec "$@" ;;
 esac
 
 cleanup() {
-  if [ -n "$lease_path" ]; then rm -f -- "$lease_path"; fi
+  if [ -n "$lease_path" ]; then node "$lease_helper" remove "$lease_dir" "$lease_path" >/dev/null 2>&1 || :; fi
 }
 
 backend_pid=

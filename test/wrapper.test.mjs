@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir, rm } from "node:fs/promises";
+import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -64,6 +64,40 @@ test("a missing compiler lease falls open before sccache starts", async () => {
 
     assert.equal(result.code, 23, result.stderr);
     assert.equal(await readFile(invocations, "utf8"), "compiler\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a symlinked compiler lease directory falls open without foreign writes", async () => {
+  const root = await temporaryRoot("wrapper lease symlink");
+  try {
+    const invocations = join(root, "invocations");
+    const compiler = join(root, "compiler");
+    const backend = join(root, "backend");
+    const foreign = join(root, "foreign leases");
+    const leases = join(root, "leases");
+    await mkdir(foreign, { mode: 0o700 });
+    await writeFile(join(foreign, "must-survive"), "sentinel\n", { mode: 0o600 });
+    await symlink(foreign, leases);
+    await writeExecutable(compiler, "#!/bin/sh\nprintf 'compiler\\n' >> \"$TEST_INVOCATIONS\"\nexit 29\n");
+    await writeExecutable(backend, "#!/bin/sh\nprintf 'backend\\n' >> \"$TEST_INVOCATIONS\"\nexit 31\n");
+
+    const result = await run(join(REPO_ROOT, "bin", "fm-rustc-wrapper"), [compiler], {
+      cwd: root,
+      env: {
+        ...process.env,
+        FIRSTMATE_RUST_CACHE_BACKEND: backend,
+        FIRSTMATE_RUST_CACHE_LEASE_DIR: leases,
+        FIRSTMATE_RUST_CACHE_LEASE_TOKEN: "0123456789abcdef0123456789abcdef",
+        TEST_INVOCATIONS: invocations,
+      },
+    });
+
+    assert.equal(result.code, 29, result.stderr);
+    assert.equal(await readFile(invocations, "utf8"), "compiler\n");
+    assert.equal(await readFile(join(foreign, "must-survive"), "utf8"), "sentinel\n");
+    assert.deepEqual(await readdir(foreign), ["must-survive"]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

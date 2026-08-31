@@ -22,6 +22,7 @@ import {
   runStreaming,
   status,
   temporaryRoot,
+  writeExecutable,
 } from "./helpers.mjs";
 
 function extensionHarness() {
@@ -292,21 +293,48 @@ test("real Pi bash integration reuses cache and preserves every namespace/lifecy
     const leasesDir = join(cacheRoot, "namespaces", currentA.namespace, "leases");
     assert.deepEqual(await readdir(leasesDir), [], "concurrent commands must release every lease");
 
-    const sleeper = runStreaming(
-      process.execPath,
-      [CLI, "run", "--", process.execPath, "-e", "setTimeout(()=>{}, 30000)"],
-      { cwd: projectA, env },
+    await removeTarget(projectA);
+    const compilerStarted = join(root, "slow compiler started");
+    const compilerRelease = join(root, "slow compiler release");
+    const slowRustc = join(root, "slow rustc");
+    const rustc = await run("sh", ["-c", "command -v rustc"], { cwd: projectA, env });
+    assert.equal(rustc.code, 0, rustc.stderr);
+    await writeExecutable(
+      slowRustc,
+      "#!/bin/sh\n: > \"$FIRSTMATE_RUST_CACHE_TEST_COMPILER_STARTED\"\nwhile [ ! -e \"$FIRSTMATE_RUST_CACHE_TEST_COMPILER_RELEASE\" ]; do sleep 0.02; done\nexec \"$FIRSTMATE_RUST_CACHE_TEST_REAL_RUSTC\" \"$@\"\n",
     );
+    const interruptedEnv = {
+      ...env,
+      RUSTC: slowRustc,
+      RUSTFLAGS: "-C debuginfo=1",
+      FIRSTMATE_RUST_CACHE_TEST_COMPILER_STARTED: compilerStarted,
+      FIRSTMATE_RUST_CACHE_TEST_COMPILER_RELEASE: compilerRelease,
+      FIRSTMATE_RUST_CACHE_TEST_REAL_RUSTC: rustc.stdout.trim(),
+    };
+    const sleeper = runStreaming(process.execPath, [CLI, "run", "--", "cargo", "build", "--lib"], {
+      cwd: projectA,
+      env: interruptedEnv,
+    });
     await waitFor(async () => {
       try {
-        return (await readdir(leasesDir)).length === 1;
+        await stat(compilerStarted);
+        return (await readdir(leasesDir)).some((entry) => /\.[1-9][0-9]*\.json$/.test(entry));
       } catch {
         return false;
       }
     });
-    sleeper.kill("SIGTERM");
+    sleeper.kill("SIGKILL");
     await new Promise((resolvePromise) => sleeper.on("close", resolvePromise));
-    await waitFor(async () => (await readdir(leasesDir)).length === 0);
+    result = await cli(["clean", "--project", projectA], projectA, env);
+    assert.equal(result.code, 2, result.stderr, "compiler-owned lease must protect cleanup after parent interruption");
+    await writeFile(compilerRelease, "release\n");
+    await waitFor(async () => {
+      try {
+        return !(await readdir(leasesDir)).some((entry) => /\.[1-9][0-9]*\.json$/.test(entry));
+      } catch {
+        return false;
+      }
+    });
     result = await cli(["clean", "--project", projectA], projectA, env);
     assert.equal(result.code, 0, result.stderr, "cleanup after interruption must recover deterministically");
 
