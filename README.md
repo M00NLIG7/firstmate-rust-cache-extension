@@ -23,8 +23,9 @@ automatic path reaches only Pi-based workers. Other axes are listed under
 Installation only registers `/rust-cache`; it does not override `bash`, create
 configuration, start sccache, or create cache directories. A valid selection for
 the current Git origin, the `cargo-rustc` workload, and a security context must
-exist before the package installs its cached `bash` wrapper for that Pi session.
-Only a direct `cargo` command with ordinary unquoted arguments is cached.
+exist before the package installs its `bash` wrapper for that Pi session. Only a
+direct `cargo` command with ordinary unquoted arguments is eligible for caching
+when descriptor-bound containment is available; it otherwise runs ordinarily.
 Commands using `--manifest-path` are deliberately excluded; shell syntax,
 directory changes, scripts, indirection, and other commands run through Pi
 unchanged so a selected namespace cannot cross an unselected working directory.
@@ -80,9 +81,10 @@ Launch that Pi/Firstmate worker with
 not fall back to another selection.
 
 The package also ships `firstmate-rust-cache` for source checkouts or ordinary
-npm executable installation. Its `run -- COMMAND [ARG...]` path enables caching
-only for a direct `cargo` invocation without `--manifest-path`; all other
-commands run ordinarily. Automatic Firstmate integration remains the Pi `bash`
+npm executable installation. Its `run -- COMMAND [ARG...]` path can activate
+caching only for a direct `cargo` invocation without `--manifest-path` when
+descriptor-bound containment is available; all other commands, and all current
+runtimes, run ordinarily. Automatic Firstmate integration remains the Pi `bash`
 path.
 
 ## Inspectable configuration

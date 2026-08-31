@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import {
   finishExecution,
+  getStoragePaths,
   prepareExecution,
   supportsDescriptorBoundCacheOperations,
   supportsPinnedCompilerLeases,
@@ -68,6 +69,32 @@ test("enable/disable are idempotent and backend absence runs an ordinary Cargo b
     result = await cli(["forget", "--project", project], project, env);
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stdout, /unchanged/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("configuration mutations release their private lock directory", async () => {
+  const root = await temporaryRoot("configuration lock release");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/configuration-lock.git");
+    const env = await makeEnvironment(root, null);
+    const paths = getStoragePaths(env);
+    for (const command of [
+      ["enable", "--project", project, "--max-size", "8MiB"],
+      ["disable", "--project", project],
+      ["enable", "--project", project, "--max-size", "8MiB"],
+    ]) {
+      const result = await cli(command, project, env);
+      assert.equal(result.code, 0, result.stderr);
+      await assert.rejects(stat(paths.configLock), { code: "ENOENT" });
+      const siblings = await readdir(dirname(paths.configDir));
+      assert.equal(
+        siblings.some((name) => name.startsWith(`${basename(paths.configDir)}.config.lock.`)),
+        false,
+        "configuration mutations must not retain released lock directories",
+      );
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
