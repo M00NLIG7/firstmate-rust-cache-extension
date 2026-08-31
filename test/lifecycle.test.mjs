@@ -152,6 +152,7 @@ test("run bypasses shell and foreign Cargo manifest commands", async () => {
   try {
     const first = await createProject(root, "first project", "git@github.com:example/first.git");
     const second = await createProject(root, "second project", "git@github.com:example/second.git");
+    const nested = await createProject(first, "nested repository", "git@github.com:example/nested.git");
     const backend = join(root, "sccache");
     await writeExecutable(backend, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'sccache 0.17.0'; exit 0; fi\nexec \"$@\"\n");
     const env = await makeEnvironment(root, backend);
@@ -172,6 +173,16 @@ test("run bypasses shell and foreign Cargo manifest commands", async () => {
     );
     assert.equal(result.code, 0, result.stderr);
     assert.match(result.stderr, /unverified-cargo-command/);
+    await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
+
+    result = await cli(
+      ["run", "--", "cargo", "build", "--lib", "--manifest-path", join(nested, "Cargo.toml")],
+      first,
+      env,
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /unverified-cargo-command/);
+    await stat(join(nested, "target", "debug"));
     await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });

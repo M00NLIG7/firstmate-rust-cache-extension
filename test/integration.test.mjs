@@ -106,9 +106,9 @@ test("real Pi bash integration reuses cache and preserves every namespace/lifecy
       { crateName: "cache_project_b" },
     );
     const manifestProject = await createProject(
-      root,
-      "manifest-project",
-      "https://github.com/example/cache-manifest-project.git",
+      projectA,
+      "nested-git-repository",
+      "https://github.com/example/cache-nested-project.git",
       { crateName: "cache_manifest_project" },
     );
 
@@ -239,7 +239,7 @@ test("real Pi bash integration reuses cache and preserves every namespace/lifecy
     );
 
     const beforeForeignManifest = await status(projectA, env);
-    await invokeBash(harness.tools[0], projectA, "cargo build --lib --manifest-path ../manifest-project/Cargo.toml");
+    await invokeBash(harness.tools[0], projectA, "cargo build --lib --manifest-path nested-git-repository/Cargo.toml");
     const afterForeignManifest = await status(projectA, env);
     assert.deepEqual(
       afterForeignManifest.stats,
