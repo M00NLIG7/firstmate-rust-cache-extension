@@ -131,7 +131,7 @@ test("pinned lease support requires an accessible procfs boundary", async () => 
   }
 });
 
-test("activation preserves namespace state when descriptor-bound operations are unavailable", async () => {
+test("activation preserves namespace state when descriptor-bound operations are unavailable", { skip: supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("descriptor activation");
   try {
     const project = await createProject(root, "project", "git@github.com:example/descriptor-activation.git");

@@ -32,7 +32,7 @@ unchanged so a selected namespace cannot cross an unselected working directory.
 
 ## Requirements
 
-- A runtime with descriptor-relative filesystem operations that can bind namespace creation, activation, and recursive cleanup to an opened directory identity. The current Node runtime does not expose that primitive, so every platform reports `unsupported-platform` and runs selected Cargo commands uncached without creating cache state. When an existing owned cache tree is present, `clean` and `uninstall --remove-cache` report `cleanup-unsupported` and preserve it rather than attempting removal.
+- Linux with `/proc/self/fd`, `rustc`, and the vendored offline filesystem helper. The helper supplies no-follow, descriptor-bound lock-release and removal operations before a selected workload becomes ready; the compiler wrapper pins its active lease directory. Other platforms report `unsupported-platform` and run selected Cargo commands uncached without creating cache state; existing cache data is preserved when containment cannot be proved.
 - Node.js 20 or newer
 - Pi >=0.84.0 <0.85.0 (the tested public extension contract)
 - Rust/Cargo
@@ -82,9 +82,9 @@ not fall back to another selection.
 
 The package also ships `firstmate-rust-cache` for source checkouts or ordinary
 npm executable installation. Its `run -- COMMAND [ARG...]` path can activate
-caching only for a direct `cargo` invocation without `--manifest-path` when
-descriptor-bound containment is available; all other commands, and all current
-runtimes, run ordinarily. Automatic Firstmate integration remains the Pi `bash`
+caching only for a direct `cargo` invocation without `--manifest-path` on a
+supported Linux runtime; all other commands and unsupported platforms run
+ordinarily. Automatic Firstmate integration remains the Pi `bash`
 path.
 
 ## Inspectable configuration
@@ -240,11 +240,12 @@ package-owned data when descriptor-bound containment is available:
 
 Both flows are idempotent. Cache removal refuses active leases, an unprovable
 live backend, or an unavailable descriptor-bound removal primitive instead of
-risking an unrelated process. On the current Node runtime,
+risking an unrelated process. On an unsupported runtime,
 `uninstall --remove-cache` reports `cleanup-unsupported` and preserves existing
-cache data and configuration; use `--keep-cache` to disable selections while
-retaining the index. Reinstalling the same reviewed package is sufficient to
-inspect deliberately retained cache.
+cache data and configuration when the descriptor-bound Linux helper is
+unavailable; use `--keep-cache` to disable selections while retaining the
+index. Reinstalling the same reviewed package is sufficient to inspect
+deliberately retained cache.
 
 ## Support matrix
 
@@ -252,7 +253,8 @@ inspect deliberately retained cache.
 
 | Harness | Automatic cache support | Boundary |
 | --- | --- | --- |
-| Pi 0.84.x | **Package supported; caching unavailable** | Public Pi package loads after selection, but the current Node runtime lacks descriptor-bound containment. |
+| Pi 0.84.x on Linux | **Supported** | Public Pi package loads after selection and uses the offline descriptor-bound helper. |
+| Pi 0.84.x elsewhere | **Ordinary-build fallback** | Public Pi package loads after selection but does not activate caching. |
 | pi-signed using Pi 0.84.x | **Package contract; caching unavailable** | Firstmate documents the same Pi engine/extension behavior; install in that host's Pi package home. |
 | Claude, Codex, OpenCode, Grok, Kimi, Cursor, Muse | **Unsupported** | Firstmate's public package host exposes no worker hook, and this package does not inject instructions or alter core launch templates. |
 | Raw/unverified launch commands | **Unsupported** | No public loading or environment contract is assumed. |
