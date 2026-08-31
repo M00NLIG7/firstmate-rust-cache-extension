@@ -144,6 +144,39 @@ test("pinned lease support requires an accessible procfs boundary", async () => 
   }
 });
 
+test("active lease capacity bypasses excess executions and recovers after release", { skip: process.platform !== "linux" || !supportsDescriptorBoundCacheOperations() }, async () => {
+  const root = await temporaryRoot("lease capacity");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/lease-capacity.git");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\necho 'sccache 0.17.0'\n");
+    const env = await makeEnvironment(root, backend);
+    const enabled = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(enabled.code, 0, enabled.stderr);
+
+    const executions = await Promise.all(Array.from({ length: 40 }, () => prepareExecution(project, env)));
+    const ready = executions.filter((plan) => plan.state === "ready");
+    const bypassed = executions.filter((plan) => plan.state === "bypass");
+    assert.ok(ready.length > 0);
+    assert.ok(bypassed.length > 0, "excess selected builds must bypass caching");
+    assert.ok(bypassed.every((plan) => plan.reason === "lease-capacity-exhausted"));
+
+    const leases = await readdir(ready[0].namespace.leasesDir);
+    const metadataBytes = (
+      await Promise.all(leases.map(async (name) => Number((await stat(join(ready[0].namespace.leasesDir, name), { bigint: true })).blocks * 512n)))
+    ).reduce((total, bytes) => total + bytes, 0);
+    assert.ok(metadataBytes <= 128 * 1024, "active lease metadata must stay inside its reserve");
+
+    await Promise.all(ready.map((plan) => finishExecution(plan)));
+    assert.deepEqual(await readdir(ready[0].namespace.leasesDir), []);
+    const retried = await prepareExecution(project, env);
+    assert.equal(retried.state, "ready");
+    await finishExecution(retried);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("activation preserves namespace state when descriptor-bound operations are unavailable", { skip: supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("descriptor activation");
   try {

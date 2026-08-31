@@ -23,6 +23,19 @@ async function compileFilesystemHelper(root) {
   return helper;
 }
 
+async function waitForFile(path) {
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try {
+      await stat(path);
+      return;
+    } catch {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 20));
+    }
+  }
+  throw new Error(`timed out waiting for ${path}`);
+}
+
 test("a failed compiler invoked through sccache is not replayed", async () => {
   const root = await temporaryRoot("wrapper");
   try {
@@ -151,6 +164,49 @@ test("a symlinked compiler lease directory falls open without foreign writes", a
     assert.equal(await readFile(invocations, "utf8"), "compiler\n");
     assert.equal(await readFile(join(foreign, "must-survive"), "utf8"), "sentinel\n");
     assert.deepEqual(await readdir(foreign), ["must-survive"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("compiler lease slot exhaustion falls open and reuses released slots", { skip: !supportsPinnedLeases }, async () => {
+  const root = await temporaryRoot("wrapper lease slots");
+  try {
+    const invocations = join(root, "invocations");
+    const started = join(root, "backend started");
+    const release = join(root, "backend release");
+    const compiler = join(root, "compiler");
+    const backend = join(root, "backend");
+    const leases = join(root, "leases");
+    await mkdir(leases, { mode: 0o700 });
+    const helper = await compileFilesystemHelper(root);
+    await writeExecutable(compiler, "#!/bin/sh\nprintf 'compiler\\n' >> \"$TEST_INVOCATIONS\"\nexit 0\n");
+    await writeExecutable(
+      backend,
+      "#!/bin/sh\n: > \"$TEST_BACKEND_STARTED\"\nwhile [ ! -e \"$TEST_BACKEND_RELEASE\" ]; do sleep 0.02; done\nprintf 'backend\\n' >> \"$TEST_INVOCATIONS\"\nexec \"$@\"\n",
+    );
+    const env = {
+      ...process.env,
+      FIRSTMATE_RUST_CACHE_BACKEND: backend,
+      FIRSTMATE_RUST_CACHE_LEASE_DIR: leases,
+      FIRSTMATE_RUST_CACHE_LEASE_TOKEN: "0123456789abcdef0123456789abcdef",
+      FIRSTMATE_RUST_CACHE_LEASE_SLOT_LIMIT: "1",
+      FIRSTMATE_RUST_CACHE_FS_HELPER: helper,
+      ...(await leaseIdentity(leases)),
+      TEST_INVOCATIONS: invocations,
+      TEST_BACKEND_STARTED: started,
+      TEST_BACKEND_RELEASE: release,
+    };
+
+    const first = run(join(REPO_ROOT, "bin", "fm-rustc-wrapper"), [compiler], { cwd: root, env });
+    await waitForFile(started);
+    const second = await run(join(REPO_ROOT, "bin", "fm-rustc-wrapper"), [compiler], { cwd: root, env });
+    assert.equal(second.code, 0, second.stderr);
+    await writeFile(release, "release\n");
+    const firstResult = await first;
+    assert.equal(firstResult.code, 0, firstResult.stderr);
+    assert.deepEqual((await readFile(invocations, "utf8")).trim().split("\n").sort(), ["backend", "compiler", "compiler"]);
+    assert.deepEqual(await readdir(leases), []);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

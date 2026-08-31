@@ -13,6 +13,7 @@ const leaseToken = process.env.FIRSTMATE_RUST_CACHE_LEASE_TOKEN;
 const leaseDevice = process.env.FIRSTMATE_RUST_CACHE_LEASE_DEVICE;
 const leaseInode = process.env.FIRSTMATE_RUST_CACHE_LEASE_INODE;
 const filesystemHelper = process.env.FIRSTMATE_RUST_CACHE_FS_HELPER;
+const leaseSlotLimit = Number(process.env.FIRSTMATE_RUST_CACHE_LEASE_SLOT_LIMIT);
 
 function hasLeaseDirectoryIdentity() {
   return /^\d+$/.test(leaseDevice || "") && /^\d+$/.test(leaseInode || "");
@@ -79,30 +80,43 @@ async function removePinnedLease(handle, name) {
 }
 
 async function createLease() {
-  if (!leaseDirectory || !tokenPattern.test(leaseToken || "") || !hasLeaseDirectoryIdentity()) return null;
+  if (
+    !leaseDirectory ||
+    !tokenPattern.test(leaseToken || "") ||
+    !hasLeaseDirectoryIdentity() ||
+    !Number.isSafeInteger(leaseSlotLimit) ||
+    leaseSlotLimit < 1 ||
+    leaseSlotLimit > 64
+  ) return null;
   const directory = await openPinnedDirectory(leaseDirectory);
   if (!directory) return null;
-  const name = `${leaseToken}.${process.pid}.json`;
-  let file;
-  let created = false;
-  try {
-    file = await open(
-      pinnedPath(directory, name),
-      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
-      0o600,
-    );
-    created = true;
-    await file.writeFile(`${JSON.stringify({ pid: process.pid, token: leaseToken, created_at: new Date().toISOString() })}\n`);
-    const info = await lstat(pinnedPath(directory, name));
-    if (!info.isFile() || info.isSymbolicLink()) throw new Error("unsafe lease");
-    return { directory, name };
-  } catch {
-    if (created) await removePinnedLease(directory, name);
-    await directory.close().catch(() => {});
-    return null;
-  } finally {
-    await file?.close().catch(() => {});
+  for (let slot = 1; slot <= leaseSlotLimit; slot += 1) {
+    const name = `${leaseToken}.${slot}.json`;
+    let file;
+    let created = false;
+    try {
+      file = await open(
+        pinnedPath(directory, name),
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+        0o600,
+      );
+      created = true;
+      await file.writeFile(`${JSON.stringify({ pid: process.pid, token: leaseToken, created_at: new Date().toISOString() })}\n`);
+      const info = await lstat(pinnedPath(directory, name));
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error("unsafe lease");
+      return { directory, name };
+    } catch (error) {
+      if (created) await removePinnedLease(directory, name);
+      if (error?.code !== "EEXIST") {
+        await directory.close().catch(() => {});
+        return null;
+      }
+    } finally {
+      await file?.close().catch(() => {});
+    }
   }
+  await directory.close().catch(() => {});
+  return null;
 }
 
 async function hasBackend() {

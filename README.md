@@ -187,6 +187,10 @@ allocations fit:
 sccache receives each namespace maximum minus a 256 KiB reserve for the owned
 state/config files, so backend artifacts plus namespace metadata remain inside
 the configured allocation when descriptor-bound containment is available.
+At most six selected Cargo executions per namespace receive cache leases at
+once; each reserves one parent lease and up to four compiler leases within
+half of that metadata reserve. Excess work runs as an ordinary uncached Cargo
+build, and released lease slots are reused.
 Retention defaults to 30 days and applies without a monitor at Pi session start
 for a ready selection and by explicit `gc`; an in-use namespace is skipped.
 `disable` is idempotent and preserves data:
