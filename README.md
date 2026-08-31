@@ -37,6 +37,13 @@ unchanged so a selected namespace cannot cross an unselected working directory.
 - Rust/Cargo
 - sccache 0.17.0 or newer on `PATH`
 
+## CI dependency updates
+
+CI uses explicit runner generations, exact Node and Rust releases, SHA-pinned
+actions, and a digest-pinned Linux Rust container. Update these together only
+after reviewing the new release and image digest, then update the workflow's
+immutable-input policy test in the same change.
+
 sccache 0.17's client-side mode is required so each disposable worktree can use
 its own `SCCACHE_BASEDIRS` while a namespace's small backend-owned server shares
 stats and cache state. The extension adds no daemon, scheduler, monitor, remote
