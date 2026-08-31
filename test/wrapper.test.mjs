@@ -5,6 +5,8 @@ import test from "node:test";
 
 import { REPO_ROOT, run, temporaryRoot, writeExecutable } from "./helpers.mjs";
 
+const supportsPinnedLeases = process.platform === "linux";
+
 test("a failed compiler invoked through sccache is not replayed", async () => {
   const root = await temporaryRoot("wrapper");
   try {
@@ -35,7 +37,7 @@ test("a failed compiler invoked through sccache is not replayed", async () => {
 
     assert.equal(result.code, 19, result.stderr);
     assert.equal(result.stderr, "compiler failed\n");
-    assert.equal(await readFile(invocations, "utf8"), "backend\ncompiler\n");
+    assert.equal(await readFile(invocations, "utf8"), supportsPinnedLeases ? "backend\ncompiler\n" : "compiler\n");
     assert.deepEqual(await readdir(leases), []);
   } finally {
     await rm(root, { recursive: true, force: true });

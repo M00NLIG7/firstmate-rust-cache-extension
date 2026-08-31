@@ -107,9 +107,11 @@ export default function firstmateRustCache(pi) {
 
   pi.on("session_start", async (_event, ctx) => {
     const activation = await inspectActivation(ctx.cwd, process.env);
-    if (activation.state === "ready") registerCachedBash(ctx.cwd);
+    if (activation.state === "ready") {
+      registerCachedBash(ctx.cwd);
+      collectExpired(process.env).catch(() => {});
+    }
     await updateStatus(ctx);
-    collectExpired(process.env).catch(() => {});
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {

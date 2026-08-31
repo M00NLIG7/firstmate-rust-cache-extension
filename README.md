@@ -31,9 +31,9 @@ unchanged so a selected namespace cannot cross an unselected working directory.
 
 ## Requirements
 
-- macOS or Linux
+- Linux with procfs for cacheable compiler launches; other platforms run selected Cargo commands uncached
 - Node.js 20 or newer
-- Pi 0.84.x (the tested public extension contract)
+- Pi >=0.84.0 <0.85.0 (the tested public extension contract)
 - Rust/Cargo
 - sccache 0.17.0 or newer on `PATH`
 

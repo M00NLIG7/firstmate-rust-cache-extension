@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
 import firstmateRustCache from "../extensions/firstmate-rust-cache.mjs";
-import { cli, createProject, makeEnvironment, REPO_ROOT, run, temporaryRoot } from "./helpers.mjs";
+import { finishExecution, prepareExecution } from "../lib/core.mjs";
+import { cli, createProject, makeEnvironment, REPO_ROOT, run, temporaryRoot, writeExecutable } from "./helpers.mjs";
 
 function fakePi() {
   const events = new Map();
@@ -69,6 +70,41 @@ test("installation is inert until an explicit project/workload selection exists"
     const status = JSON.parse(result.stdout);
     assert.equal(status.state, "disabled");
     assert.equal(status.reason, "not-configured");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an unselected Pi session leaves expired selected cache state untouched", async () => {
+  const root = await temporaryRoot("unselected session");
+  try {
+    const selected = await createProject(root, "selected", "git@github.com:example/selected.git");
+    const unselected = await createProject(root, "unselected", "git@github.com:example/unselected.git");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'sccache 0.17.0'; fi\n");
+    const env = await makeEnvironment(root, backend);
+    let result = await cli(["enable", "--project", selected, "--max-size", "8MiB", "--retention-days", "1"], selected, env);
+    assert.equal(result.code, 0, result.stderr);
+    const plan = await prepareExecution(selected, env);
+    assert.equal(plan.state, "ready");
+    await finishExecution(plan);
+    const state = join(env.FIRSTMATE_RUST_CACHE_CACHE_DIR, "namespaces", plan.namespace.namespaceId, "state.json");
+    const value = JSON.parse(await readFile(state, "utf8"));
+    value.last_used_at = "2000-01-01T00:00:00.000Z";
+    await writeFile(state, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+
+    const previous = { ...process.env };
+    for (const key of Object.keys(process.env)) delete process.env[key];
+    Object.assign(process.env, env);
+    try {
+      const harness = fakePi();
+      firstmateRustCache(harness.api);
+      await harness.events.get("session_start")({}, fakeContext(unselected));
+    } finally {
+      for (const key of Object.keys(process.env)) delete process.env[key];
+      Object.assign(process.env, previous);
+    }
+    await stat(state);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

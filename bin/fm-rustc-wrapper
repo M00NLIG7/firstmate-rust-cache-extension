@@ -1,56 +1,120 @@
-#!/bin/sh
-# Fail-open Cargo RUSTC_WRAPPER for Firstmate Rust Cache.
-set -u
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
+import { access, lstat, open, unlink } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
 
-compiler=${1-}
-backend=${FIRSTMATE_RUST_CACHE_BACKEND-}
-lease_dir=${FIRSTMATE_RUST_CACHE_LEASE_DIR-}
-lease_token=${FIRSTMATE_RUST_CACHE_LEASE_TOKEN-}
+const tokenPattern = /^[0-9a-f]{32}$/;
+const compiler = process.argv[2];
+const compilerArgs = process.argv.slice(3);
+const backend = process.env.FIRSTMATE_RUST_CACHE_BACKEND;
+const leaseDirectory = process.env.FIRSTMATE_RUST_CACHE_LEASE_DIR;
+const leaseToken = process.env.FIRSTMATE_RUST_CACHE_LEASE_TOKEN;
 
-if [ -z "$compiler" ] || [ -z "$backend" ] || [ ! -x "$backend" ]; then
-  exec "$@"
-fi
-
-lease_path=
-case "$lease_token" in
-  ????????????????????????????????)
-    case "$lease_token" in
-      *[!0123456789abcdef]*) exec "$@" ;;
-    esac
-    lease_helper=$(
-      CDPATH=''
-      export CDPATH
-      cd -- "$(dirname -- "$0")" && pwd -P
-    )/fm-rustc-lease.mjs || exec "$@"
-    [ -r "$lease_helper" ] || exec "$@"
-    lease_path=$(node "$lease_helper" create "$lease_dir" "$lease_token" "$$" 2>/dev/null) || exec "$@"
-    [ -n "$lease_path" ] || exec "$@"
-    ;;
-  *) exec "$@" ;;
-esac
-
-cleanup() {
-  if [ -n "$lease_path" ]; then node "$lease_helper" remove "$lease_dir" "$lease_path" >/dev/null 2>&1 || :; fi
+async function openPinnedDirectory(path) {
+  if (process.platform !== "linux") return null;
+  let handle;
+  try {
+    handle = await open(sep, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    for (const piece of resolve(path).split(sep).filter(Boolean)) {
+      const next = await open(
+        join("/proc/self/fd", String(handle.fd), piece),
+        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+      );
+      await handle.close();
+      handle = next;
+    }
+    const info = await handle.stat();
+    if ((typeof process.getuid === "function" && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) {
+      await handle.close();
+      return null;
+    }
+    return handle;
+  } catch {
+    await handle?.close().catch(() => {});
+    return null;
+  }
 }
 
-backend_pid=
-wait_backend() {
-  wait "$backend_pid"
-  status=$?
-  cleanup
-  trap - HUP INT TERM EXIT
-  exit "$status"
+function pinnedPath(handle, name) {
+  return join("/proc/self/fd", String(handle.fd), name);
 }
 
-forward_signal() {
-  kill -"$1" "$backend_pid" 2>/dev/null || :
-  wait_backend
+async function removePinnedLease(handle, name) {
+  try {
+    const info = await lstat(pinnedPath(handle, name));
+    if (!info.isFile() || info.isSymbolicLink()) return;
+    await unlink(pinnedPath(handle, name));
+  } catch {
+    return;
+  }
 }
 
-trap cleanup EXIT
-trap 'forward_signal HUP' HUP
-trap 'forward_signal INT' INT
-trap 'forward_signal TERM' TERM
-"$backend" "$@" &
-backend_pid=$!
-wait_backend
+async function createLease() {
+  if (!leaseDirectory || !tokenPattern.test(leaseToken || "")) return null;
+  const directory = await openPinnedDirectory(leaseDirectory);
+  if (!directory) return null;
+  const name = `${leaseToken}.${process.pid}.json`;
+  let file;
+  let created = false;
+  try {
+    file = await open(
+      pinnedPath(directory, name),
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+      0o600,
+    );
+    created = true;
+    await file.writeFile(`${JSON.stringify({ pid: process.pid, token: leaseToken, created_at: new Date().toISOString() })}\n`);
+    const info = await lstat(pinnedPath(directory, name));
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("unsafe lease");
+    return { directory, name };
+  } catch {
+    if (created) await removePinnedLease(directory, name);
+    await directory.close().catch(() => {});
+    return null;
+  } finally {
+    await file?.close().catch(() => {});
+  }
+}
+
+async function hasBackend() {
+  if (!backend) return false;
+  try {
+    await access(backend, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function run(command, args, lease) {
+  let child;
+  try {
+    child = spawn(command, args, { stdio: "inherit", env: process.env });
+  } catch {
+    await removePinnedLease(lease?.directory, lease?.name);
+    await lease?.directory.close().catch(() => {});
+    process.exitCode = 127;
+    return;
+  }
+  const forward = (signal) => child.kill(signal);
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) process.on(signal, () => forward(signal));
+  child.once("error", () => {
+    process.exitCode = 127;
+  });
+  child.once("close", async (code, signal) => {
+    await removePinnedLease(lease?.directory, lease?.name);
+    await lease?.directory.close().catch(() => {});
+    if (typeof code === "number") process.exitCode = code;
+    else process.exitCode = signal ? 1 : 127;
+  });
+}
+
+if (!compiler) {
+  process.exitCode = 127;
+} else if (!(await hasBackend())) {
+  await run(compiler, compilerArgs, null);
+} else {
+  const lease = await createLease();
+  await run(lease ? backend : compiler, lease ? [compiler, ...compilerArgs] : compilerArgs, lease);
+}
