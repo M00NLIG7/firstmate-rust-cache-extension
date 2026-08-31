@@ -223,6 +223,15 @@ test("real Pi bash integration reuses cache and preserves every namespace/lifecy
     assert.ok(statusA.cache.bytes <= statusA.cache.max_bytes, "namespace disk use must stay within its configured bound");
     assert.ok(statusB.cache.bytes <= statusB.cache.max_bytes, "namespace disk use must stay within its configured bound");
 
+    const beforeCrossDirectoryCommand = await status(projectB, env);
+    await invokeBash(harness.tools[0], projectA, `cd "${projectB}" && cargo build --lib`);
+    const afterCrossDirectoryCommand = await status(projectB, env);
+    assert.deepEqual(
+      afterCrossDirectoryCommand.stats,
+      beforeCrossDirectoryCommand.stats,
+      "a shell command that changes directories must bypass the selected cache",
+    );
+
     const cacheRoot = env.FIRSTMATE_RUST_CACHE_CACHE_DIR;
     const namespaceA = join(cacheRoot, "namespaces", statusA.namespace);
     const namespaceB = join(cacheRoot, "namespaces", statusB.namespace);

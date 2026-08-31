@@ -24,6 +24,9 @@ Installation only registers `/rust-cache`; it does not override `bash`, create
 configuration, start sccache, or create cache directories. A valid selection for
 the current Git origin, the `cargo-rustc` workload, and a security context must
 exist before the package installs its cached `bash` wrapper for that Pi session.
+Only a direct `cargo` command with ordinary unquoted arguments is cached; shell
+syntax, directory changes, scripts, and other commands run through Pi unchanged
+so a selected namespace cannot cross an unselected working directory.
 
 ## Requirements
 
@@ -88,7 +91,7 @@ integration remains the Pi `bash` path.
 root contains only short-lived private Unix sockets. Configuration is mode
 `0600`; owned directories are mode `0700`. A linked, foreign-owned, overly
 permissive, malformed, duplicate, or unknown-version configuration bypasses
-caching.
+caching. Creation and cleanup reject symlinks in every state-root ancestor.
 
 Example (IDs and timestamps abbreviated):
 

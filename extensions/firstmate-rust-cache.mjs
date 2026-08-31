@@ -18,6 +18,10 @@ import {
   statusForProject,
 } from "../lib/core.mjs";
 
+function isDirectCargoCommand(command) {
+  return typeof command === "string" && /^cargo(?:[ \t]+[^\s;&|`$()<>\\'"#]+)*[ \t]*$/.test(command);
+}
+
 /** @param {import("@earendil-works/pi-coding-agent").ExtensionAPI} pi */
 export default function firstmateRustCache(pi) {
   let bashRegistered = false;
@@ -40,6 +44,10 @@ export default function firstmateRustCache(pi) {
     pi.registerTool({
       ...publicShape,
       async execute(toolCallId, params, signal, onUpdate, ctx) {
+        if (!isDirectCargoCommand(params?.command)) {
+          const ordinary = createBashTool(ctx.cwd);
+          return ordinary.execute(toolCallId, params, signal, onUpdate);
+        }
         let plan;
         try {
           plan = await prepareExecution(ctx.cwd, process.env);
@@ -67,9 +75,6 @@ export default function firstmateRustCache(pi) {
           return ordinary.execute(toolCallId, params, signal, onUpdate);
         }
 
-        // Once the command starts, never replay the shell command on a tool
-        // transport error or cancellation. The rustc wrapper itself owns the
-        // narrower safe backend-to-rustc fallback.
         try {
           return await cached.execute(toolCallId, params, signal, onUpdate);
         } finally {

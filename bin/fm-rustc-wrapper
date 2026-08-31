@@ -4,9 +4,52 @@ set -u
 
 compiler=${1-}
 backend=${FIRSTMATE_RUST_CACHE_BACKEND-}
+lease_dir=${FIRSTMATE_RUST_CACHE_LEASE_DIR-}
+lease_token=${FIRSTMATE_RUST_CACHE_LEASE_TOKEN-}
 
 if [ -z "$compiler" ] || [ -z "$backend" ] || [ ! -x "$backend" ]; then
   exec "$@"
 fi
 
-exec "$backend" "$@"
+lease_path=
+case "$lease_token" in
+  ????????????????????????????????)
+    case "$lease_token" in
+      *[!0123456789abcdef]*) exec "$@" ;;
+    esac
+    if [ -z "$lease_dir" ] || [ ! -d "$lease_dir" ]; then exec "$@"; fi
+    lease_path="$lease_dir/$lease_token.$$.json"
+    (umask 077; set -C; : > "$lease_path") 2>/dev/null || exec "$@"
+    printf '{"pid":%s,"token":"%s","created_at":"%s"}\n' "$$" "$lease_token" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$lease_path" || {
+      rm -f -- "$lease_path"
+      exec "$@"
+    }
+    ;;
+  *) exec "$@" ;;
+esac
+
+cleanup() {
+  if [ -n "$lease_path" ]; then rm -f -- "$lease_path"; fi
+}
+
+backend_pid=
+wait_backend() {
+  wait "$backend_pid"
+  status=$?
+  cleanup
+  trap - HUP INT TERM EXIT
+  exit "$status"
+}
+
+forward_signal() {
+  kill -"$1" "$backend_pid" 2>/dev/null || :
+  wait_backend
+}
+
+trap cleanup EXIT
+trap 'forward_signal HUP' HUP
+trap 'forward_signal INT' INT
+trap 'forward_signal TERM' TERM
+"$backend" "$@" &
+backend_pid=$!
+wait_backend
