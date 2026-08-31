@@ -2,7 +2,7 @@ use std::env;
 use std::ffi::CString;
 use std::io::Read;
 use std::os::raw::{c_char, c_int};
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::io::{FromRawFd, IntoRawFd, RawFd};
 
 #[repr(C)]
 struct Stat {
@@ -30,7 +30,7 @@ extern "C" {
     fn fstat(fd: c_int, stat: *mut Stat) -> c_int;
     fn open(path: *const c_char, flags: c_int) -> c_int;
     fn openat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
-    fn unlinkat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
+    fn unlink(path: *const c_char) -> c_int;
     fn rmdir(path: *const c_char) -> c_int;
     fn geteuid() -> u32;
 }
@@ -43,10 +43,6 @@ const O_NOFOLLOW: c_int = 0o400000;
 const O_DIRECTORY: c_int = 0x100000;
 #[cfg(target_os = "macos")]
 const O_NOFOLLOW: c_int = 0x100;
-#[cfg(target_os = "linux")]
-const AT_REMOVEDIR: c_int = 0x200;
-#[cfg(target_os = "macos")]
-const AT_REMOVEDIR: c_int = 0x80;
 const O_RDONLY: c_int = 0;
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
@@ -91,23 +87,51 @@ fn open_directory(path: &str) -> Result<RawFd, String> {
     Ok(fd)
 }
 
-fn owner_matches(fd: RawFd, token: &str) -> Result<bool, String> {
+fn open_owned_file(fd: RawFd, name: &str) -> Result<RawFd, String> {
+    let name = cstring(name)?;
+    let child = unsafe { openat(fd, name.as_ptr(), O_RDONLY | O_NOFOLLOW) };
+    if child < 0 { return Err("cannot open file".to_string()); }
+    let info = match stat_fd(child) {
+        Ok(value) => value,
+        Err(error) => { unsafe { close(child); } return Err(error); }
+    };
+    if info.st_mode & S_IFMT != S_IFREG || info.st_uid != unsafe { geteuid() } || info.st_mode & 0o077 != 0 {
+        unsafe { close(child); }
+        return Err("unsafe file".to_string());
+    }
+    Ok(child)
+}
+
+fn owner_matches(fd: RawFd, token: &str) -> Result<Option<RawFd>, String> {
     let name = cstring("owner.json")?;
     let owner = unsafe { openat(fd, name.as_ptr(), O_RDONLY | O_NOFOLLOW) };
-    if owner < 0 { return Ok(false); }
+    if owner < 0 { return Ok(None); }
     let result = (|| {
         let info = stat_fd(owner)?;
         if info.st_mode & S_IFMT != S_IFREG || info.st_uid != unsafe { geteuid() } || info.st_mode & 0o077 != 0 {
-            return Ok(false);
+            return Ok(None);
         }
         let mut file = unsafe { std::fs::File::from_raw_fd(owner) };
         let mut contents = String::new();
-        file.read_to_string(&mut contents).map_err(|_| "cannot read owner".to_string())?;
-        std::mem::forget(file);
-        Ok(contents.contains(&format!("\"token\":\"{}\"", token)))
+        let read = file.read_to_string(&mut contents);
+        let owner = file.into_raw_fd();
+        read.map_err(|_| "cannot read owner".to_string())?;
+        Ok(contents.contains(&format!("\"token\":\"{}\"", token)).then_some(owner))
     })();
-    unsafe { close(owner); }
+    if !matches!(&result, Ok(Some(_))) { unsafe { close(owner); } }
     result
+}
+
+fn unlink_pinned(fd: RawFd) -> Result<(), String> {
+    let pinned = cstring(&pinned_path(fd))?;
+    if unsafe { unlink(pinned.as_ptr()) } != 0 { return Err("cannot unlink pinned file".to_string()); }
+    Ok(())
+}
+
+fn remove_pinned_directory(fd: RawFd) -> Result<(), String> {
+    let pinned = cstring(&pinned_path(fd))?;
+    if unsafe { rmdir(pinned.as_ptr()) } != 0 { return Err("cannot remove pinned directory".to_string()); }
+    Ok(())
 }
 
 fn release_lock(path: &str, device: &str, inode: &str, token: &str) -> Result<(), String> {
@@ -117,19 +141,15 @@ fn release_lock(path: &str, device: &str, inode: &str, token: &str) -> Result<()
     let fd = open_directory(path)?;
     let result = (|| {
         let identity = owned_directory(fd)?;
-        if identity.st_dev.to_string() != device || identity.st_ino.to_string() != inode || !owner_matches(fd, token)? {
+        if identity.st_dev.to_string() != device || identity.st_ino.to_string() != inode {
             return Err("identity changed".to_string());
         }
-        let name = cstring("owner.json")?;
-        if unsafe { unlinkat(fd, name.as_ptr(), 0) } != 0 { return Err("cannot remove owner".to_string()); }
+        let owner = owner_matches(fd, token)?.ok_or_else(|| "identity changed".to_string())?;
+        unlink_pinned(owner)?;
+        unsafe { close(owner); }
         let after = owned_directory(fd)?;
         if after.st_dev != identity.st_dev || after.st_ino != identity.st_ino { return Err("identity changed".to_string()); }
-        #[cfg(target_os = "linux")]
-        let pinned = format!("/proc/self/fd/{}", fd);
-        #[cfg(target_os = "macos")]
-        let pinned = format!("/dev/fd/{}", fd);
-        let pinned = cstring(&pinned)?;
-        if unsafe { rmdir(pinned.as_ptr()) } != 0 { return Err("cannot remove empty lock".to_string()); }
+        remove_pinned_directory(fd)?;
         Ok(())
     })();
     unsafe { close(fd); }
@@ -152,14 +172,18 @@ fn remove_tree_fd(fd: RawFd) -> Result<(), String> {
         let child = cstring(&name)?;
         let child_fd = unsafe { openat(fd, child.as_ptr(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW) };
         if child_fd >= 0 {
-            let result = remove_tree_fd(child_fd);
+            let result = (|| {
+                owned_directory(child_fd)?;
+                remove_tree_fd(child_fd)?;
+                remove_pinned_directory(child_fd)
+            })();
             unsafe { close(child_fd); }
             result?;
-            if unsafe { unlinkat(fd, child.as_ptr(), AT_REMOVEDIR) } != 0 {
-                return Err("cannot remove child directory".to_string());
-            }
-        } else if unsafe { unlinkat(fd, child.as_ptr(), 0) } != 0 {
-            return Err("cannot remove child entry".to_string());
+        } else {
+            let child_fd = open_owned_file(fd, &name)?;
+            let result = unlink_pinned(child_fd);
+            unsafe { close(child_fd); }
+            result?;
         }
     }
     Ok(())
@@ -175,9 +199,35 @@ fn remove_tree(path: &str, device: &str, inode: &str) -> Result<(), String> {
         remove_tree_fd(fd)?;
         let after = owned_directory(fd)?;
         if after.st_dev != identity.st_dev || after.st_ino != identity.st_ino { return Err("identity changed".to_string()); }
-        let pinned = cstring(&pinned_path(fd))?;
-        if unsafe { rmdir(pinned.as_ptr()) } != 0 { return Err("cannot remove directory".to_string()); }
+        remove_pinned_directory(fd)?;
         Ok(())
+    })();
+    unsafe { close(fd); }
+    result
+}
+
+fn remove_file(path: &str, device: &str, inode: &str) -> Result<(), String> {
+    let parent = std::path::Path::new(path).parent().and_then(|value| value.to_str()).ok_or_else(|| "invalid file path".to_string())?;
+    let name = std::path::Path::new(path).file_name().and_then(|value| value.to_str()).ok_or_else(|| "invalid file path".to_string())?;
+    let parent_fd = open_directory(parent)?;
+    let result = (|| {
+        let fd = open_owned_file(parent_fd, name)?;
+        let identity = stat_fd(fd)?;
+        if identity.st_dev.to_string() != device || identity.st_ino.to_string() != inode { unsafe { close(fd); } return Err("identity changed".to_string()); }
+        let result = unlink_pinned(fd);
+        unsafe { close(fd); }
+        result
+    })();
+    unsafe { close(parent_fd); }
+    result
+}
+
+fn remove_empty_directory(path: &str, device: &str, inode: &str) -> Result<(), String> {
+    let fd = open_directory(path)?;
+    let result = (|| {
+        let identity = owned_directory(fd)?;
+        if identity.st_dev.to_string() != device || identity.st_ino.to_string() != inode { return Err("identity changed".to_string()); }
+        remove_pinned_directory(fd)
     })();
     unsafe { close(fd); }
     result
@@ -189,6 +239,8 @@ fn main() {
         [_, command] if command == "probe" => Ok(()),
         [_, command, path, device, inode, token] if command == "release-lock" => release_lock(path, device, inode, token),
         [_, command, path, device, inode] if command == "remove-tree" => remove_tree(path, device, inode),
+        [_, command, path, device, inode] if command == "remove-file" => remove_file(path, device, inode),
+        [_, command, path, device, inode] if command == "remove-empty-directory" => remove_empty_directory(path, device, inode),
         _ => Err("invalid arguments".to_string()),
     };
     if let Err(message) = result {

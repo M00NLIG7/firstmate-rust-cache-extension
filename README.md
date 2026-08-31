@@ -255,7 +255,8 @@ deliberately retained cache.
 | --- | --- | --- |
 | Pi 0.84.x on Linux | **Supported** | Public Pi package loads after selection and uses the offline descriptor-bound helper. |
 | Pi 0.84.x elsewhere | **Ordinary-build fallback** | Public Pi package loads after selection but does not activate caching. |
-| pi-signed using Pi 0.84.x | **Package contract; caching unavailable** | Firstmate documents the same Pi engine/extension behavior; install in that host's Pi package home. |
+| pi-signed using Pi 0.84.x on Linux | **Supported** | Uses the same public Pi package contract and descriptor-bound helper as Pi. |
+| pi-signed using Pi 0.84.x elsewhere | **Ordinary-build fallback** | Uses the same package contract but does not activate caching without the supported helper. |
 | Claude, Codex, OpenCode, Grok, Kimi, Cursor, Muse | **Unsupported** | Firstmate's public package host exposes no worker hook, and this package does not inject instructions or alter core launch templates. |
 | Raw/unverified launch commands | **Unsupported** | No public loading or environment contract is assumed. |
 
