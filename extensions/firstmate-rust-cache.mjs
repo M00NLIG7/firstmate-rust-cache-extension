@@ -12,15 +12,13 @@ import { executeAdmin, tokenizeAdminArgs } from "../lib/admin.mjs";
 import {
   cacheEnvironment,
   collectExpired,
+  directCargoArguments,
   finishExecution,
   inspectActivation,
+  isCargoInvocationWithinProject,
   prepareExecution,
   statusForProject,
 } from "../lib/core.mjs";
-
-function isDirectCargoCommand(command) {
-  return typeof command === "string" && /^cargo(?:[ \t]+[^\s;&|`$()<>\\'"#]+)*[ \t]*$/.test(command);
-}
 
 /** @param {import("@earendil-works/pi-coding-agent").ExtensionAPI} pi */
 export default function firstmateRustCache(pi) {
@@ -44,7 +42,8 @@ export default function firstmateRustCache(pi) {
     pi.registerTool({
       ...publicShape,
       async execute(toolCallId, params, signal, onUpdate, ctx) {
-        if (!isDirectCargoCommand(params?.command)) {
+        const cargo = directCargoArguments(params?.command);
+        if (!cargo || !(await isCargoInvocationWithinProject(ctx.cwd, cargo[0], cargo.slice(1), process.env))) {
           const ordinary = createBashTool(ctx.cwd);
           return ordinary.execute(toolCallId, params, signal, onUpdate);
         }

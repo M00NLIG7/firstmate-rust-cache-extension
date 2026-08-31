@@ -3,7 +3,7 @@ import { mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/
 import { join } from "node:path";
 import test from "node:test";
 
-import { prepareExecution } from "../lib/core.mjs";
+import { finishExecution, prepareExecution } from "../lib/core.mjs";
 import { cli, createProject, makeEnvironment, status, temporaryRoot, writeExecutable } from "./helpers.mjs";
 
 test("enable/disable are idempotent and backend absence runs an ordinary Cargo build", async () => {
@@ -142,6 +142,66 @@ test("symlinked state-root ancestors are refused before creating package state",
     assert.equal(result.code, 2);
     assert.equal(await readFile(join(foreign, "must-survive"), "utf8"), "sentinel\n");
     assert.deepEqual(await readdir(foreign), ["must-survive"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("run bypasses shell and foreign Cargo manifest commands", async () => {
+  const root = await temporaryRoot("verified command");
+  try {
+    const first = await createProject(root, "first project", "git@github.com:example/first.git");
+    const second = await createProject(root, "second project", "git@github.com:example/second.git");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'sccache 0.17.0'; exit 0; fi\nexec \"$@\"\n");
+    const env = await makeEnvironment(root, backend);
+
+    let result = await cli(["enable", "--project", first, "--max-size", "8MiB"], first, env);
+    assert.equal(result.code, 0, result.stderr);
+
+    result = await cli(["run", "--", "sh", "-c", `cd "${second}" && cargo build --lib`], first, env);
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /unverified-cargo-command/);
+    await stat(join(second, "target", "debug"));
+    await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
+
+    result = await cli(
+      ["run", "--", "cargo", "build", "--lib", "--manifest-path", join(second, "Cargo.toml")],
+      first,
+      env,
+    );
+    assert.equal(result.code, 0, result.stderr);
+    assert.match(result.stderr, /unverified-cargo-command/);
+    await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("clean refuses a symlinked lease directory without touching foreign leases", async () => {
+  const root = await temporaryRoot("lease symlink");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/lease-symlink.git");
+    const backend = join(root, "sccache");
+    await writeExecutable(backend, "#!/bin/sh\necho 'sccache 0.17.0'\n");
+    const env = await makeEnvironment(root, backend);
+    let result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
+    assert.equal(result.code, 0, result.stderr);
+    const plan = await prepareExecution(project, env);
+    assert.equal(plan.state, "ready");
+    await finishExecution(plan);
+
+    const foreign = join(root, "foreign leases");
+    const foreignLease = join(foreign, "0123456789abcdef0123456789abcdef.json");
+    await mkdir(foreign, { recursive: true, mode: 0o700 });
+    await writeFile(foreignLease, '{"pid":999999}\n', { mode: 0o600 });
+    await rm(plan.namespace.leasesDir, { recursive: true, force: true });
+    await symlink(foreign, plan.namespace.leasesDir);
+
+    result = await cli(["clean", "--project", project], project, env);
+    assert.equal(result.code, 2);
+    assert.match(result.stderr, /symlinked|unsafe-state/);
+    assert.equal(await readFile(foreignLease, "utf8"), '{"pid":999999}\n');
   } finally {
     await rm(root, { recursive: true, force: true });
   }

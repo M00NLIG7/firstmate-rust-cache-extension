@@ -6,7 +6,12 @@
  */
 
 import { executeAdmin, HELP } from "../lib/admin.mjs";
-import { finishExecution, prepareExecution, spawnInherited } from "../lib/core.mjs";
+import {
+  finishExecution,
+  isCargoInvocationWithinProject,
+  prepareExecution,
+  spawnInherited,
+} from "../lib/core.mjs";
 
 const SIGNAL_EXIT = { SIGHUP: 129, SIGINT: 130, SIGTERM: 143 };
 
@@ -35,7 +40,11 @@ async function runChild(argv) {
   }
 
   try {
-    plan = await prepareExecution(process.cwd(), process.env);
+    if (await isCargoInvocationWithinProject(process.cwd(), command, args, process.env)) {
+      plan = await prepareExecution(process.cwd(), process.env);
+    } else {
+      plan = { state: "bypass", reason: "unverified-cargo-command" };
+    }
     if (interrupted) return SIGNAL_EXIT[interrupted] || 1;
     const environment = plan.state === "ready" ? plan.environment : process.env;
     if (plan.state === "ready") {

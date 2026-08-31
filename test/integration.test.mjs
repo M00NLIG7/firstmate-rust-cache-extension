@@ -105,6 +105,12 @@ test("real Pi bash integration reuses cache and preserves every namespace/lifecy
       "https://github.com/example/cache-project-b.git",
       { crateName: "cache_project_b" },
     );
+    const manifestProject = await createProject(
+      root,
+      "manifest-project",
+      "https://github.com/example/cache-manifest-project.git",
+      { crateName: "cache_manifest_project" },
+    );
 
     let result = await cli(
       ["enable", "--project", projectA, "--max-size", "96MiB", "--retention-days", "1"],
@@ -231,6 +237,16 @@ test("real Pi bash integration reuses cache and preserves every namespace/lifecy
       beforeCrossDirectoryCommand.stats,
       "a shell command that changes directories must bypass the selected cache",
     );
+
+    const beforeForeignManifest = await status(projectA, env);
+    await invokeBash(harness.tools[0], projectA, "cargo build --lib --manifest-path ../manifest-project/Cargo.toml");
+    const afterForeignManifest = await status(projectA, env);
+    assert.deepEqual(
+      afterForeignManifest.stats,
+      beforeForeignManifest.stats,
+      "a manifest outside the selected project must bypass the selected cache",
+    );
+    await stat(join(manifestProject, "target", "debug"));
 
     const cacheRoot = env.FIRSTMATE_RUST_CACHE_CACHE_DIR;
     const namespaceA = join(cacheRoot, "namespaces", statusA.namespace);
