@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { access, lstat, open, unlink } from "node:fs/promises";
+import { access, lstat, open } from "node:fs/promises";
 import { join, resolve, sep } from "node:path";
 
 const tokenPattern = /^[0-9a-f]{32}$/;
@@ -12,6 +12,7 @@ const leaseDirectory = process.env.FIRSTMATE_RUST_CACHE_LEASE_DIR;
 const leaseToken = process.env.FIRSTMATE_RUST_CACHE_LEASE_TOKEN;
 const leaseDevice = process.env.FIRSTMATE_RUST_CACHE_LEASE_DEVICE;
 const leaseInode = process.env.FIRSTMATE_RUST_CACHE_LEASE_INODE;
+const filesystemHelper = process.env.FIRSTMATE_RUST_CACHE_FS_HELPER;
 
 function hasLeaseDirectoryIdentity() {
   return /^\d+$/.test(leaseDevice || "") && /^\d+$/.test(leaseInode || "");
@@ -51,11 +52,27 @@ function pinnedPath(handle, name) {
   return join("/proc/self/fd", String(handle.fd), name);
 }
 
+function runHelper(args) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(filesystemHelper, args, { stdio: "ignore" });
+    child.once("error", () => resolvePromise(false));
+    child.once("close", (code) => resolvePromise(code === 0));
+  });
+}
+
 async function removePinnedLease(handle, name) {
+  if (!handle || !name || !filesystemHelper || !hasLeaseDirectoryIdentity()) return;
   try {
     const info = await lstat(pinnedPath(handle, name));
     if (!info.isFile() || info.isSymbolicLink()) return;
-    await unlink(pinnedPath(handle, name));
+    await runHelper([
+      "remove-file",
+      join(leaseDirectory, name),
+      leaseDevice,
+      leaseInode,
+      String(info.dev),
+      String(info.ino),
+    ]);
   } catch {
     return;
   }

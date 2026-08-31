@@ -6,6 +6,7 @@ import test from "node:test";
 import { REPO_ROOT, run, temporaryRoot, writeExecutable } from "./helpers.mjs";
 
 const supportsPinnedLeases = process.platform === "linux";
+const helperSource = new URL("../bin/fm-fs-helper.rs", import.meta.url);
 
 async function leaseIdentity(path) {
   const info = await stat(path, { bigint: true });
@@ -13,6 +14,13 @@ async function leaseIdentity(path) {
     FIRSTMATE_RUST_CACHE_LEASE_DEVICE: String(info.dev),
     FIRSTMATE_RUST_CACHE_LEASE_INODE: String(info.ino),
   };
+}
+
+async function compileFilesystemHelper(root) {
+  const helper = join(root, "fm-fs-helper");
+  const result = await run("rustc", [helperSource.pathname, "--edition=2021", "-O", "-o", helper]);
+  assert.equal(result.code, 0, result.stderr);
+  return helper;
 }
 
 test("a failed compiler invoked through sccache is not replayed", async () => {
@@ -23,6 +31,7 @@ test("a failed compiler invoked through sccache is not replayed", async () => {
     const backend = join(root, "backend");
     const leases = join(root, "leases");
     await mkdir(leases, { mode: 0o700 });
+    const helper = await compileFilesystemHelper(root);
     await writeExecutable(
       compiler,
       "#!/bin/sh\nprintf 'compiler\\n' >> \"$TEST_INVOCATIONS\"\nprintf 'compiler failed\\n' >&2\nexit 19\n",
@@ -39,6 +48,7 @@ test("a failed compiler invoked through sccache is not replayed", async () => {
         FIRSTMATE_RUST_CACHE_BACKEND: backend,
         FIRSTMATE_RUST_CACHE_LEASE_DIR: leases,
         FIRSTMATE_RUST_CACHE_LEASE_TOKEN: "0123456789abcdef0123456789abcdef",
+        FIRSTMATE_RUST_CACHE_FS_HELPER: helper,
         ...(await leaseIdentity(leases)),
         TEST_INVOCATIONS: invocations,
       },
