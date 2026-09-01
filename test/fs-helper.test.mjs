@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -85,6 +85,36 @@ test("filesystem helper refuses a replacement parent", { skip: process.platform 
     assert.notEqual(result.code, 0);
     assert.equal(await readFile(join(parent, name), "utf8"), "replacement\n");
     assert.equal(await readFile(join(retired, name), "utf8"), "owned\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("filesystem helper removes an owned child below a standard XDG-style parent", { skip: process.platform !== "linux" }, async () => {
+  const root = await temporaryRoot("filesystem helper XDG parent");
+  try {
+    const helper = join(root, "fm-fs-helper");
+    let result = await run("rustc", [helperSource.pathname, "--edition=2021", "-O", "-o", helper]);
+    assert.equal(result.code, 0, result.stderr);
+
+    const parent = join(root, "xdg parent");
+    const file = join(parent, "owned");
+    await mkdir(parent, { mode: 0o700 });
+    await chmod(parent, 0o755);
+    await writeFile(file, "cache-data\n", { mode: 0o600 });
+    const parentIdentity = await stat(parent, { bigint: true });
+    const fileIdentity = await stat(file, { bigint: true });
+
+    result = await run(helper, [
+      "remove-file",
+      file,
+      String(parentIdentity.dev),
+      String(parentIdentity.ino),
+      String(fileIdentity.dev),
+      String(fileIdentity.ino),
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    await assert.rejects(readFile(file, "utf8"), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }

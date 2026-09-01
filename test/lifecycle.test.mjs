@@ -113,6 +113,22 @@ test("concurrent configuration mutations retain both selections", { skip: proces
   }
 });
 
+test("fresh cache-removing uninstall is idempotent without configuration residue", { skip: process.platform !== "linux" }, async () => {
+  const root = await temporaryRoot("fresh uninstall");
+  try {
+    const project = await createProject(root, "project", "git@github.com:example/fresh-uninstall.git");
+    const env = await makeEnvironment(root, null);
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const result = await cli(["uninstall", "--remove-cache"], project, env);
+      assert.equal(result.code, 0, result.stderr);
+      await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR), { code: "ENOENT" });
+      await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("aggregate configured limits are enforced before cache state is created", async () => {
   const root = await temporaryRoot("limits");
   try {
@@ -184,19 +200,22 @@ test("active lease capacity bypasses excess executions and recovers after releas
   }
 });
 
-test("activation preserves namespace state when descriptor-bound operations are unavailable", { skip: supportsDescriptorBoundCacheOperations() }, async () => {
-  const root = await temporaryRoot("descriptor activation");
+test("unsupported platforms refuse concurrent configuration mutations without state", { skip: supportsDescriptorBoundCacheOperations() }, async () => {
+  const root = await temporaryRoot("unsupported configuration mutation");
   try {
-    const project = await createProject(root, "project", "git@github.com:example/descriptor-activation.git");
-    const backend = join(root, "sccache");
-    await writeExecutable(backend, "#!/bin/sh\necho 'sccache 0.17.0'\n");
-    const env = await makeEnvironment(root, backend);
-    const result = await cli(["enable", "--project", project, "--max-size", "8MiB"], project, env);
-    assert.equal(result.code, 0, result.stderr);
-    const activation = await prepareExecution(project, env);
+    const first = await createProject(root, "first", "git@github.com:example/unsupported-first.git");
+    const second = await createProject(root, "second", "git@github.com:example/unsupported-second.git");
+    const env = await makeEnvironment(root, null);
+    const results = await Promise.all([
+      cli(["enable", "--project", first, "--max-size", "8MiB"], first, env),
+      cli(["enable", "--project", second, "--max-size", "8MiB"], second, env),
+    ]);
     assert.equal(supportsDescriptorBoundCacheOperations(), false);
-    assert.equal(activation.state, "bypass");
-    assert.equal(activation.reason, "unsupported-platform");
+    for (const result of results) {
+      assert.equal(result.code, 2);
+      assert.match(result.stderr, /refusing configuration mutation/);
+    }
+    await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR), { code: "ENOENT" });
     await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });

@@ -104,6 +104,17 @@ fn owned_directory(fd: RawFd) -> Result<Stat, String> {
     Ok(value)
 }
 
+fn owned_bound_parent(fd: RawFd) -> Result<Stat, String> {
+    let value = stat_fd(fd)?;
+    if value.st_mode & S_IFMT != S_IFDIR
+        || value.st_uid != unsafe { geteuid() }
+        || value.st_mode & 0o022 != 0
+    {
+        return Err("unsafe parent directory".to_string());
+    }
+    Ok(value)
+}
+
 fn owned_file(fd: RawFd) -> Result<Stat, String> {
     let value = stat_fd(fd)?;
     if value.st_mode & S_IFMT != S_IFREG
@@ -152,7 +163,6 @@ fn open_directory(path: &str) -> Result<RawFd, String> {
         }
         fd = next;
     }
-    owned_directory(fd)?;
     Ok(fd)
 }
 
@@ -188,7 +198,7 @@ fn open_bound_parent(
 ) -> Result<(RawFd, String), String> {
     let (parent_path, name) = split_path(path)?;
     let parent = open_directory(parent_path)?;
-    if !matches_identity(&owned_directory(parent)?, parent_device, parent_inode) {
+    if !matches_identity(&owned_bound_parent(parent)?, parent_device, parent_inode) {
         unsafe {
             close(parent);
         }
