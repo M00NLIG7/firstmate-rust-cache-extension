@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 
 import {
@@ -109,6 +109,10 @@ test("concurrent first configuration mutations retain both selections", { skip: 
     for (const result of results) assert.equal(result.code, 0, result.stderr);
     const config = JSON.parse(await readFile(join(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR, "config.json"), "utf8"));
     assert.equal(config.projects.length, 2);
+    assert.deepEqual(
+      (await readdir(dirname(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR))).sort(),
+      ["cargo home", "configuration with spaces"],
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -126,6 +130,7 @@ test("fresh cache-removing uninstall is idempotent without configuration residue
       for (const result of results) assert.equal(result.code, 0, result.stderr);
       await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR), { code: "ENOENT" });
       await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
+      assert.deepEqual(await readdir(dirname(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR)), ["cargo home"]);
     }
   } finally {
     await rm(root, { recursive: true, force: true });
