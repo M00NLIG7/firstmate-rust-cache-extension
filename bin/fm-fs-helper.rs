@@ -318,7 +318,8 @@ fn process_incarnation(_: c_int) -> Result<Option<String>, String> {
 
 fn participant_name(token: &str) -> Result<String, String> {
     let pid = unsafe { getpid() };
-    let incarnation = process_incarnation(pid)?.ok_or_else(|| "cannot inspect lock participant".to_string())?;
+    let incarnation =
+        process_incarnation(pid)?.ok_or_else(|| "cannot inspect lock participant".to_string())?;
     Ok(format!("participant-{}-{}-{}", pid, incarnation, token))
 }
 
@@ -403,7 +404,12 @@ fn bootstrap_has_other_participants(lock: RawFd, own: &str) -> Result<bool, Stri
     Ok(false)
 }
 
-fn finalize_bootstrap_lock(parent: RawFd, name: &str, lock: RawFd, participant: &str) -> Result<(), String> {
+fn finalize_bootstrap_lock(
+    parent: RawFd,
+    name: &str,
+    lock: RawFd,
+    participant: &str,
+) -> Result<(), String> {
     unlink_child(lock, participant, 0)?;
     if bootstrap_has_other_participants(lock, participant)? {
         return Ok(());
