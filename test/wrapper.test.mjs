@@ -61,6 +61,7 @@ test("a failed compiler invoked through sccache is not replayed", async () => {
         FIRSTMATE_RUST_CACHE_BACKEND: backend,
         FIRSTMATE_RUST_CACHE_LEASE_DIR: leases,
         FIRSTMATE_RUST_CACHE_LEASE_TOKEN: "0123456789abcdef0123456789abcdef",
+        FIRSTMATE_RUST_CACHE_LEASE_SLOT_LIMIT: "4",
         FIRSTMATE_RUST_CACHE_FS_HELPER: helper,
         ...(await leaseIdentity(leases)),
         TEST_INVOCATIONS: invocations,
