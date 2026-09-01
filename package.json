@@ -1,0 +1,49 @@
+{
+  "name": "firstmate-rust-cache-extension",
+  "version": "0.1.0",
+  "description": "Explicitly selected, fail-open local sccache integration for Pi-based Firstmate workers",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/M00NLIG7/firstmate-rust-cache-extension.git"
+  },
+  "keywords": [
+    "pi-package",
+    "firstmate",
+    "rust",
+    "cargo",
+    "sccache"
+  ],
+  "bin": {
+    "firstmate-rust-cache": "./bin/firstmate-rust-cache.mjs"
+  },
+  "files": [
+    "bin",
+    "extensions",
+    "lib",
+    "LICENSE",
+    "README.md"
+  ],
+  "pi": {
+    "extensions": [
+      "./extensions/firstmate-rust-cache.mjs"
+    ]
+  },
+  "scripts": {
+    "check": "node --check lib/core.mjs && node --check lib/admin.mjs && node --check extensions/firstmate-rust-cache.mjs && node --check bin/firstmate-rust-cache.mjs && node --check bin/fm-rustc-wrapper",
+    "test": "node --test test/*.test.mjs",
+    "test:platform-fallback": "node --test test/ci-policy.test.mjs test/default-off.test.mjs test/lifecycle.test.mjs test/wrapper.test.mjs",
+    "test:integration": "node --test test/integration.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.84.0 <0.85.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "0.84.0",
+    "yaml": "2.8.3"
+  }
+}

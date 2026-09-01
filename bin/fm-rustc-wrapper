@@ -1,0 +1,162 @@
+#!/usr/bin/env node
+import { spawn } from "node:child_process";
+import { constants as fsConstants } from "node:fs";
+import { access, lstat, open } from "node:fs/promises";
+import { join, resolve, sep } from "node:path";
+
+const tokenPattern = /^[0-9a-f]{32}$/;
+const compiler = process.argv[2];
+const compilerArgs = process.argv.slice(3);
+const backend = process.env.FIRSTMATE_RUST_CACHE_BACKEND;
+const leaseDirectory = process.env.FIRSTMATE_RUST_CACHE_LEASE_DIR;
+const leaseToken = process.env.FIRSTMATE_RUST_CACHE_LEASE_TOKEN;
+const leaseDevice = process.env.FIRSTMATE_RUST_CACHE_LEASE_DEVICE;
+const leaseInode = process.env.FIRSTMATE_RUST_CACHE_LEASE_INODE;
+const filesystemHelper = process.env.FIRSTMATE_RUST_CACHE_FS_HELPER;
+const leaseSlotLimit = Number(process.env.FIRSTMATE_RUST_CACHE_LEASE_SLOT_LIMIT);
+
+function hasLeaseDirectoryIdentity() {
+  return /^\d+$/.test(leaseDevice || "") && /^\d+$/.test(leaseInode || "");
+}
+
+async function openPinnedDirectory(path) {
+  if (process.platform !== "linux") return null;
+  let handle;
+  try {
+    handle = await open(sep, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+    for (const piece of resolve(path).split(sep).filter(Boolean)) {
+      const next = await open(
+        join("/proc/self/fd", String(handle.fd), piece),
+        fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
+      );
+      await handle.close();
+      handle = next;
+    }
+    const info = await handle.stat();
+    if ((typeof process.getuid === "function" && info.uid !== process.getuid()) || (info.mode & 0o077) !== 0) {
+      await handle.close();
+      return null;
+    }
+    const identity = await handle.stat({ bigint: true });
+    if (String(identity.dev) !== leaseDevice || String(identity.ino) !== leaseInode) {
+      await handle.close();
+      return null;
+    }
+    return handle;
+  } catch {
+    await handle?.close().catch(() => {});
+    return null;
+  }
+}
+
+function pinnedPath(handle, name) {
+  return join("/proc/self/fd", String(handle.fd), name);
+}
+
+function runHelper(args) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(filesystemHelper, args, { stdio: "ignore" });
+    child.once("error", () => resolvePromise(false));
+    child.once("close", (code) => resolvePromise(code === 0));
+  });
+}
+
+async function removePinnedLease(handle, name) {
+  if (!handle || !name || !filesystemHelper || !hasLeaseDirectoryIdentity()) return;
+  try {
+    const info = await lstat(pinnedPath(handle, name));
+    if (!info.isFile() || info.isSymbolicLink()) return;
+    await runHelper([
+      "remove-file",
+      join(leaseDirectory, name),
+      leaseDevice,
+      leaseInode,
+      String(info.dev),
+      String(info.ino),
+    ]);
+  } catch {
+    return;
+  }
+}
+
+async function createLease() {
+  if (
+    !leaseDirectory ||
+    !tokenPattern.test(leaseToken || "") ||
+    !hasLeaseDirectoryIdentity() ||
+    !Number.isSafeInteger(leaseSlotLimit) ||
+    leaseSlotLimit < 1 ||
+    leaseSlotLimit > 64
+  ) return null;
+  const directory = await openPinnedDirectory(leaseDirectory);
+  if (!directory) return null;
+  for (let slot = 1; slot <= leaseSlotLimit; slot += 1) {
+    const name = `${leaseToken}.${slot}.json`;
+    let file;
+    let created = false;
+    try {
+      file = await open(
+        pinnedPath(directory, name),
+        fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW,
+        0o600,
+      );
+      created = true;
+      await file.writeFile(`${JSON.stringify({ pid: process.pid, token: leaseToken, created_at: new Date().toISOString() })}\n`);
+      const info = await lstat(pinnedPath(directory, name));
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error("unsafe lease");
+      return { directory, name };
+    } catch (error) {
+      if (created) await removePinnedLease(directory, name);
+      if (error?.code !== "EEXIST") {
+        await directory.close().catch(() => {});
+        return null;
+      }
+    } finally {
+      await file?.close().catch(() => {});
+    }
+  }
+  await directory.close().catch(() => {});
+  return null;
+}
+
+async function hasBackend() {
+  if (!backend) return false;
+  try {
+    await access(backend, fsConstants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function run(command, args, lease) {
+  let child;
+  try {
+    child = spawn(command, args, { stdio: "inherit", env: process.env });
+  } catch {
+    await removePinnedLease(lease?.directory, lease?.name);
+    await lease?.directory.close().catch(() => {});
+    process.exitCode = 127;
+    return;
+  }
+  const forward = (signal) => child.kill(signal);
+  for (const signal of ["SIGHUP", "SIGINT", "SIGTERM"]) process.on(signal, () => forward(signal));
+  child.once("error", () => {
+    process.exitCode = 127;
+  });
+  child.once("close", async (code, signal) => {
+    await removePinnedLease(lease?.directory, lease?.name);
+    await lease?.directory.close().catch(() => {});
+    if (typeof code === "number") process.exitCode = code;
+    else process.exitCode = signal ? 1 : 127;
+  });
+}
+
+if (!compiler) {
+  process.exitCode = 127;
+} else if (!(await hasBackend())) {
+  await run(compiler, compilerArgs, null);
+} else {
+  const lease = await createLease();
+  await run(lease ? backend : compiler, lease ? [compiler, ...compilerArgs] : compilerArgs, lease);
+}
