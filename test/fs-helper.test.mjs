@@ -175,6 +175,23 @@ test("filesystem helper removes quarantined files and recovers an interrupted lo
     assert.equal(result.code, 0, result.stderr);
     await assert.rejects(readFile(file, "utf8"), { code: "ENOENT" });
 
+    const cache = join(root, "cache");
+    const artifacts = join(cache, "artifacts");
+    await mkdir(artifacts, { recursive: true, mode: 0o700 });
+    await chmod(artifacts, 0o755);
+    await writeFile(join(artifacts, "sccache-entry"), "cache-data\n", { mode: 0o644 });
+    const cacheIdentity = await stat(cache, { bigint: true });
+    result = await run(helper, [
+      "remove-tree",
+      cache,
+      String(parentIdentity.dev),
+      String(parentIdentity.ino),
+      String(cacheIdentity.dev),
+      String(cacheIdentity.ino),
+    ]);
+    assert.equal(result.code, 0, result.stderr);
+    await assert.rejects(stat(cache), { code: "ENOENT" });
+
     const lock = join(root, "lock");
     const startHolder = () => spawn(helper, [
       "hold-lock",

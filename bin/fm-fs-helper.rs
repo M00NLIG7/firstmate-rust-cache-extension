@@ -162,6 +162,22 @@ fn owned_file(fd: RawFd) -> Result<Stat, String> {
     Ok(value)
 }
 
+fn owned_descendant_directory(fd: RawFd) -> Result<Stat, String> {
+    let value = stat_fd(fd)?;
+    if value.st_mode & S_IFMT != S_IFDIR || value.st_uid != unsafe { geteuid() } {
+        return Err("unsafe directory".to_string());
+    }
+    Ok(value)
+}
+
+fn owned_descendant_file(fd: RawFd) -> Result<Stat, String> {
+    let value = stat_fd(fd)?;
+    if value.st_mode & S_IFMT != S_IFREG || value.st_uid != unsafe { geteuid() } {
+        return Err("unsafe file".to_string());
+    }
+    Ok(value)
+}
+
 fn matches_identity(value: &Stat, device: &str, inode: &str) -> bool {
     value.st_dev.to_string() == device && value.st_ino.to_string() == inode
 }
@@ -568,10 +584,10 @@ fn remove_tree_fd(fd: RawFd) -> Result<(), String> {
         match directory {
             Ok(child) => {
                 let result = (|| {
-                    let identity = owned_directory(child)?;
+                    let identity = owned_descendant_directory(child)?;
                     let quarantined = quarantine(fd, &name)?;
                     let staged = open_child(fd, &quarantined, O_RDONLY | O_DIRECTORY)?;
-                    let staged_identity = owned_directory(staged)?;
+                    let staged_identity = owned_descendant_directory(staged)?;
                     if staged_identity.st_dev != identity.st_dev
                         || staged_identity.st_ino != identity.st_ino
                     {
@@ -596,10 +612,10 @@ fn remove_tree_fd(fd: RawFd) -> Result<(), String> {
             Err(_) => {
                 let child = open_child(fd, &name, O_RDWR)?;
                 let result = (|| {
-                    let identity = owned_file(child)?;
+                    let identity = owned_descendant_file(child)?;
                     let quarantined = quarantine(fd, &name)?;
                     let staged = open_child(fd, &quarantined, O_RDONLY)?;
-                    let staged_identity = owned_file(staged)?;
+                    let staged_identity = owned_descendant_file(staged)?;
                     unsafe {
                         close(staged);
                     }

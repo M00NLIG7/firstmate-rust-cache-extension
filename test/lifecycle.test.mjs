@@ -270,7 +270,12 @@ test("unsafe state-root overrides are refused without modifying foreign trees", 
     assert.equal(result.code, 0, result.stderr);
     result = await cli(["uninstall", "--remove-cache"], project, env);
     assert.equal(result.code, 2);
-    assert.match(result.stderr, /descriptor-bound cleanup is unavailable/);
+    assert.match(
+      result.stderr,
+      supportsDescriptorBoundCacheOperations()
+        ? /state root must not be group- or world-accessible/
+        : /descriptor-bound cleanup is unavailable/,
+    );
     assert.equal(await readFile(join(project, "must-survive"), "utf8"), "sentinel\n");
     assert.equal((await stat(project)).mode & 0o777, modeBefore, "refusal must not chmod a project tree");
     const foreignConfig = join(root, "credential directory");
@@ -308,7 +313,10 @@ test("symlinked state-root ancestors are refused before creating package state",
     assert.equal(result.code, 0, result.stderr);
     const activation = await prepareExecution(project, env);
     assert.equal(activation.state, "bypass");
-    assert.equal(activation.reason, "unsupported-platform");
+    assert.equal(
+      activation.reason,
+      supportsDescriptorBoundCacheOperations() ? "unsafe-state" : "unsupported-platform",
+    );
     assert.equal(await readFile(join(foreign, "must-survive"), "utf8"), "sentinel\n");
     assert.deepEqual(await readdir(foreign), ["must-survive"]);
 
