@@ -231,3 +231,32 @@ test("filesystem helper hands bootstrap locks to queued holders and removes them
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("filesystem helper clears a stale bootstrap participant after PID reuse", { skip: process.platform !== "linux" }, async () => {
+  const root = await temporaryRoot("filesystem helper bootstrap incarnation");
+  try {
+    const helper = join(root, "fm-fs-helper");
+    const compiled = await run("rustc", [helperSource.pathname, "--edition=2021", "-O", "-o", helper]);
+    assert.equal(compiled.code, 0, compiled.stderr);
+
+    const lock = join(root, "bootstrap-lock");
+    const parentIdentity = await stat(root, { bigint: true });
+    const staleToken = "0123456789abcdef0123456789abcdef";
+    const currentToken = "fedcba9876543210fedcba9876543210";
+    await mkdir(lock, { mode: 0o700 });
+    await writeFile(join(lock, `participant-${process.pid}-0-${staleToken}`), "", { mode: 0o600 });
+    const holder = spawn(helper, [
+      "hold-bootstrap-lock",
+      lock,
+      String(parentIdentity.dev),
+      String(parentIdentity.ino),
+      currentToken,
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+    await waitForOutput(holder, `locked:${currentToken}\n`);
+    holder.stdin.end();
+    assert.equal(await waitForClose(holder), 0);
+    await assert.rejects(stat(lock), { code: "ENOENT" });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

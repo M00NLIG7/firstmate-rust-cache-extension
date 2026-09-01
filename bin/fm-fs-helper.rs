@@ -33,21 +33,10 @@ extern "C" {
     fn openat(fd: c_int, path: *const c_char, flags: c_int, mode: u32) -> c_int;
     fn ftruncate(fd: c_int, length: i64) -> c_int;
     fn flock(fd: c_int, operation: c_int) -> c_int;
-    fn kill(pid: c_int, signal: c_int) -> c_int;
     fn mkdirat(fd: c_int, path: *const c_char, mode: u32) -> c_int;
     fn unlinkat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
     fn getpid() -> c_int;
     fn geteuid() -> u32;
-}
-
-#[cfg(target_os = "linux")]
-extern "C" {
-    fn __errno_location() -> *mut c_int;
-}
-
-#[cfg(not(target_os = "linux"))]
-extern "C" {
-    fn __error() -> *mut c_int;
 }
 
 #[cfg(target_os = "linux")]
@@ -68,7 +57,6 @@ const O_RDWR: c_int = 0o2;
 const O_CREAT: c_int = 0o100;
 const O_EXCL: c_int = 0o200;
 const LOCK_EX: c_int = 2;
-const ESRCH: c_int = 3;
 #[cfg(target_os = "linux")]
 const RENAME_NOREPLACE: u32 = 1;
 const AT_REMOVEDIR: c_int = 0x200;
@@ -269,42 +257,65 @@ fn valid_token(token: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-fn participant_name(token: &str) -> String {
-    format!("participant-{}-{}", unsafe { getpid() }, token)
+#[cfg(target_os = "linux")]
+fn process_incarnation(pid: c_int) -> Result<Option<String>, String> {
+    let stat = match std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err("cannot inspect lock participant".to_string()),
+    };
+    let Some(end_name) = stat.rfind(')') else {
+        return Err("cannot inspect lock participant".to_string());
+    };
+    let Some(start_time) = stat[end_name + 1..].split_whitespace().nth(19) else {
+        return Err("cannot inspect lock participant".to_string());
+    };
+    if start_time.is_empty() || !start_time.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("cannot inspect lock participant".to_string());
+    }
+    Ok(Some(start_time.to_string()))
 }
 
-fn participant_pid(name: &str) -> Option<c_int> {
-    let value = name.strip_prefix("participant-")?;
-    let (pid, token) = value.split_once('-')?;
-    if !valid_token(token) || pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
-        return None;
-    }
-    pid.parse::<c_int>().ok().filter(|value| *value > 0)
-}
-
-fn errno() -> c_int {
-    #[cfg(target_os = "linux")]
-    unsafe {
-        *__errno_location()
-    }
-    #[cfg(not(target_os = "linux"))]
-    unsafe {
-        *__error()
-    }
-}
-
-fn participant_is_live(pid: c_int) -> Result<bool, String> {
-    if unsafe { kill(pid, 0) } == 0 {
-        return Ok(true);
-    }
-    if errno() == ESRCH {
-        return Ok(false);
-    }
+#[cfg(not(target_os = "linux"))]
+fn process_incarnation(_: c_int) -> Result<Option<String>, String> {
     Err("cannot inspect lock participant".to_string())
 }
 
+fn participant_name(token: &str) -> Result<String, String> {
+    let pid = unsafe { getpid() };
+    let incarnation = process_incarnation(pid)?.ok_or_else(|| "cannot inspect lock participant".to_string())?;
+    Ok(format!("participant-{}-{}-{}", pid, incarnation, token))
+}
+
+fn participant_identity(name: &str) -> Option<(c_int, String)> {
+    let value = name.strip_prefix("participant-")?;
+    let mut parts = value.split('-');
+    let pid = parts.next()?;
+    let incarnation = parts.next()?;
+    let token = parts.next()?;
+    if parts.next().is_some()
+        || !valid_token(token)
+        || pid.is_empty()
+        || !pid.bytes().all(|byte| byte.is_ascii_digit())
+        || incarnation.is_empty()
+        || !incarnation.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    pid.parse::<c_int>()
+        .ok()
+        .filter(|value| *value > 0)
+        .map(|pid| (pid, incarnation.to_string()))
+}
+
+fn participant_is_live(pid: c_int, incarnation: &str) -> Result<bool, String> {
+    Ok(process_incarnation(pid)?
+        .map(|current| current == incarnation)
+        .unwrap_or(false))
+}
+
 fn create_participant(lock: RawFd, token: &str) -> Result<String, String> {
-    let name = participant_name(token);
+    let name = participant_name(token)?;
     let name_c = cstring(&name)?;
     let participant = unsafe {
         openat(
@@ -344,10 +355,10 @@ fn bootstrap_has_other_participants(lock: RawFd, own: &str) -> Result<bool, Stri
         unsafe {
             close(participant);
         }
-        let Some(pid) = participant_pid(&name) else {
+        let Some((pid, incarnation)) = participant_identity(&name) else {
             return Ok(true);
         };
-        if !valid || participant_is_live(pid)? {
+        if !valid || participant_is_live(pid, &incarnation)? {
             return Ok(true);
         }
         if unlink_child(lock, &name, 0).is_err() {
