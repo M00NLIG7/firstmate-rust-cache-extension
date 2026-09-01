@@ -33,10 +33,21 @@ extern "C" {
     fn openat(fd: c_int, path: *const c_char, flags: c_int, mode: u32) -> c_int;
     fn ftruncate(fd: c_int, length: i64) -> c_int;
     fn flock(fd: c_int, operation: c_int) -> c_int;
+    fn kill(pid: c_int, signal: c_int) -> c_int;
     fn mkdirat(fd: c_int, path: *const c_char, mode: u32) -> c_int;
     fn unlinkat(fd: c_int, path: *const c_char, flags: c_int) -> c_int;
     fn getpid() -> c_int;
     fn geteuid() -> u32;
+}
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    fn __errno_location() -> *mut c_int;
+}
+
+#[cfg(not(target_os = "linux"))]
+extern "C" {
+    fn __error() -> *mut c_int;
 }
 
 #[cfg(target_os = "linux")]
@@ -55,7 +66,9 @@ const O_DIRECTORY: c_int = 0o200000;
 const O_NOFOLLOW: c_int = 0o400000;
 const O_RDWR: c_int = 0o2;
 const O_CREAT: c_int = 0o100;
+const O_EXCL: c_int = 0o200;
 const LOCK_EX: c_int = 2;
+const ESRCH: c_int = 3;
 #[cfg(target_os = "linux")]
 const RENAME_NOREPLACE: u32 = 1;
 const AT_REMOVEDIR: c_int = 0x200;
@@ -249,17 +262,118 @@ fn unlink_child(parent: RawFd, name: &str, flags: c_int) -> Result<(), String> {
     Ok(())
 }
 
+fn valid_token(token: &str) -> bool {
+    token.len() == 32
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+fn participant_name(token: &str) -> String {
+    format!("participant-{}-{}", unsafe { getpid() }, token)
+}
+
+fn participant_pid(name: &str) -> Option<c_int> {
+    let value = name.strip_prefix("participant-")?;
+    let (pid, token) = value.split_once('-')?;
+    if !valid_token(token) || pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    pid.parse::<c_int>().ok().filter(|value| *value > 0)
+}
+
+fn errno() -> c_int {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        *__errno_location()
+    }
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        *__error()
+    }
+}
+
+fn participant_is_live(pid: c_int) -> Result<bool, String> {
+    if unsafe { kill(pid, 0) } == 0 {
+        return Ok(true);
+    }
+    if errno() == ESRCH {
+        return Ok(false);
+    }
+    Err("cannot inspect lock participant".to_string())
+}
+
+fn create_participant(lock: RawFd, token: &str) -> Result<String, String> {
+    let name = participant_name(token);
+    let name_c = cstring(&name)?;
+    let participant = unsafe {
+        openat(
+            lock,
+            name_c.as_ptr(),
+            O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW,
+            0o600,
+        )
+    };
+    if participant < 0 {
+        return Err("cannot register lock participant".to_string());
+    }
+    let result = owned_file(participant).map(|_| name);
+    unsafe {
+        close(participant);
+    }
+    result
+}
+
+fn bootstrap_has_other_participants(lock: RawFd, own: &str) -> Result<bool, String> {
+    let entries = std::fs::read_dir(format!("/proc/self/fd/{}", lock))
+        .map_err(|_| "cannot read lock directory".to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|_| "cannot read lock entry".to_string())?;
+        let name = match entry.file_name().into_string() {
+            Ok(name) => name,
+            Err(_) => return Ok(true),
+        };
+        if name == "owner.json" || name == own {
+            continue;
+        }
+        let participant = match open_child(lock, &name, O_RDWR) {
+            Ok(participant) => participant,
+            Err(_) => return Ok(true),
+        };
+        let valid = owned_file(participant).is_ok();
+        unsafe {
+            close(participant);
+        }
+        let Some(pid) = participant_pid(&name) else {
+            return Ok(true);
+        };
+        if !valid || participant_is_live(pid)? {
+            return Ok(true);
+        }
+        if unlink_child(lock, &name, 0).is_err() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn finalize_bootstrap_lock(parent: RawFd, name: &str, lock: RawFd, participant: &str) -> Result<(), String> {
+    unlink_child(lock, participant, 0)?;
+    if bootstrap_has_other_participants(lock, participant)? {
+        return Ok(());
+    }
+    unlink_child(lock, "owner.json", 0)?;
+    let _ = unlink_child(parent, name, AT_REMOVEDIR);
+    Ok(())
+}
+
 fn hold_lock(
     path: &str,
     parent_device: &str,
     parent_inode: &str,
     token: &str,
 ) -> Result<(), String> {
-    if token.len() != 32
-        || !token
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
+    if !valid_token(token) {
         return Err("invalid token".to_string());
     }
     let (parent, name) = open_bound_parent(path, parent_device, parent_inode)?;
@@ -301,6 +415,77 @@ fn hold_lock(
                     .read_to_string(&mut input)
                     .map_err(|_| "cannot wait for lock release".to_string())?;
                 Ok(())
+            })();
+            unsafe {
+                close(owner);
+            }
+            result
+        })();
+        unsafe {
+            close(lock);
+        }
+        result
+    })();
+    unsafe {
+        close(parent);
+    }
+    result
+}
+
+fn hold_bootstrap_lock(
+    path: &str,
+    parent_device: &str,
+    parent_inode: &str,
+    token: &str,
+) -> Result<(), String> {
+    if !valid_token(token) {
+        return Err("invalid token".to_string());
+    }
+    let (parent, name) = open_bound_parent(path, parent_device, parent_inode)?;
+    let result = (|| {
+        let name_c = cstring(&name)?;
+        unsafe {
+            mkdirat(parent, name_c.as_ptr(), 0o700);
+        }
+        let lock = open_child(parent, &name, O_RDONLY | O_DIRECTORY)?;
+        let result = (|| {
+            owned_directory(lock)?;
+            let participant = create_participant(lock, token)?;
+            writeln!(std::io::stdout(), "queued:{}", token)
+                .map_err(|_| "cannot publish lock participant".to_string())?;
+            std::io::stdout()
+                .flush()
+                .map_err(|_| "cannot publish lock participant".to_string())?;
+            let owner_name = cstring("owner.json")?;
+            let owner = unsafe {
+                openat(
+                    lock,
+                    owner_name.as_ptr(),
+                    O_RDWR | O_CREAT | O_NOFOLLOW,
+                    0o600,
+                )
+            };
+            if owner < 0 {
+                return Err("cannot open lock owner".to_string());
+            }
+            let result = (|| {
+                owned_file(owner)?;
+                if unsafe { flock(owner, LOCK_EX) } != 0 {
+                    return Err("cannot lock owner".to_string());
+                }
+                if unsafe { ftruncate(owner, 0) } != 0 {
+                    return Err("cannot publish lock".to_string());
+                }
+                writeln!(std::io::stdout(), "locked:{}", token)
+                    .map_err(|_| "cannot publish lock".to_string())?;
+                std::io::stdout()
+                    .flush()
+                    .map_err(|_| "cannot publish lock".to_string())?;
+                let mut input = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut input)
+                    .map_err(|_| "cannot wait for lock release".to_string())?;
+                finalize_bootstrap_lock(parent, &name, lock, &participant)
             })();
             unsafe {
                 close(owner);
@@ -475,6 +660,11 @@ fn main() {
         [_, command] if command == "probe" => Ok(()),
         [_, command, path, parent_device, parent_inode, token] if command == "hold-lock" => {
             hold_lock(path, parent_device, parent_inode, token)
+        }
+        [_, command, path, parent_device, parent_inode, token]
+            if command == "hold-bootstrap-lock" =>
+        {
+            hold_bootstrap_lock(path, parent_device, parent_inode, token)
         }
         [_, command, path, parent_device, parent_inode, device, inode]
             if command == "remove-tree" =>

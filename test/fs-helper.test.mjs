@@ -21,6 +21,40 @@ function run(command, args) {
   });
 }
 
+function waitForOutput(child, expected) {
+  return new Promise((resolvePromise, reject) => {
+    let output = "";
+    const cleanup = () => {
+      child.stdout.off("data", onData);
+      child.off("error", onError);
+      child.off("close", onClose);
+    };
+    const onData = (chunk) => {
+      output += chunk;
+      if (output.includes(expected)) {
+        cleanup();
+        resolvePromise();
+      }
+    };
+    const onError = (error) => {
+      cleanup();
+      reject(error);
+    };
+    const onClose = (code) => {
+      cleanup();
+      reject(new Error(`helper closed before ${expected} (${code ?? "signal"})`));
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", onData);
+    child.once("error", onError);
+    child.once("close", onClose);
+  });
+}
+
+function waitForClose(child) {
+  return new Promise((resolvePromise) => child.once("close", resolvePromise));
+}
+
 test("filesystem helper preserves a replacement lock", { skip: process.platform !== "linux" }, async () => {
   const root = await temporaryRoot("filesystem helper");
   try {
@@ -158,6 +192,41 @@ test("filesystem helper removes quarantined files and recovers an interrupted lo
     second.stdin.end();
     const code = await new Promise((resolvePromise) => second.once("close", resolvePromise));
     assert.equal(code, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("filesystem helper hands bootstrap locks to queued holders and removes them quiescently", { skip: process.platform !== "linux" }, async () => {
+  const root = await temporaryRoot("filesystem helper bootstrap handoff");
+  try {
+    const helper = join(root, "fm-fs-helper");
+    const compiled = await run("rustc", [helperSource.pathname, "--edition=2021", "-O", "-o", helper]);
+    assert.equal(compiled.code, 0, compiled.stderr);
+
+    const lock = join(root, "bootstrap-lock");
+    const parentIdentity = await stat(root, { bigint: true });
+    const startHolder = (token) => spawn(helper, [
+      "hold-bootstrap-lock",
+      lock,
+      String(parentIdentity.dev),
+      String(parentIdentity.ino),
+      token,
+    ], { stdio: ["pipe", "pipe", "pipe"] });
+    const firstToken = "0123456789abcdef0123456789abcdef";
+    const secondToken = "fedcba9876543210fedcba9876543210";
+    const first = startHolder(firstToken);
+    await waitForOutput(first, `locked:${firstToken}\n`);
+    const second = startHolder(secondToken);
+    await waitForOutput(second, `queued:${secondToken}\n`);
+
+    const secondLocked = waitForOutput(second, `locked:${secondToken}\n`);
+    first.stdin.end();
+    assert.equal(await waitForClose(first), 0);
+    await secondLocked;
+    second.stdin.end();
+    assert.equal(await waitForClose(second), 0);
+    await assert.rejects(stat(lock), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
