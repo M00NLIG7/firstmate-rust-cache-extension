@@ -5,6 +5,7 @@ use std::os::raw::{c_char, c_int};
 use std::os::unix::io::RawFd;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(not(target_arch = "aarch64"))]
 #[repr(C)]
 struct Stat {
     st_dev: u64,
@@ -24,6 +25,29 @@ struct Stat {
     st_ctime: i64,
     st_ctime_nsec: i64,
     __unused: [i64; 3],
+}
+
+#[cfg(target_arch = "aarch64")]
+#[repr(C)]
+struct Stat {
+    st_dev: u64,
+    st_ino: u64,
+    st_mode: u32,
+    st_nlink: u32,
+    st_uid: u32,
+    st_gid: u32,
+    st_rdev: u64,
+    __padding: u64,
+    st_size: i64,
+    st_blksize: i64,
+    st_blocks: i64,
+    st_atime: i64,
+    st_atime_nsec: i64,
+    st_mtime: i64,
+    st_mtime_nsec: i64,
+    st_ctime: i64,
+    st_ctime_nsec: i64,
+    __unused: [i64; 2],
 }
 
 extern "C" {
@@ -51,8 +75,14 @@ extern "C" {
 }
 
 const O_RDONLY: c_int = 0;
+#[cfg(not(target_arch = "aarch64"))]
 const O_DIRECTORY: c_int = 0o200000;
+#[cfg(target_arch = "aarch64")]
+const O_DIRECTORY: c_int = 0o040000;
+#[cfg(not(target_arch = "aarch64"))]
 const O_NOFOLLOW: c_int = 0o400000;
+#[cfg(target_arch = "aarch64")]
+const O_NOFOLLOW: c_int = 0o100000;
 const O_RDWR: c_int = 0o2;
 const O_CREAT: c_int = 0o100;
 const O_EXCL: c_int = 0o200;
@@ -72,11 +102,13 @@ fn stat_fd(fd: RawFd) -> Result<Stat, String> {
     let mut value = Stat {
         st_dev: 0,
         st_ino: 0,
-        st_nlink: 0,
         st_mode: 0,
+        st_nlink: 0,
         st_uid: 0,
         st_gid: 0,
         st_rdev: 0,
+        #[cfg(target_arch = "aarch64")]
+        __padding: 0,
         st_size: 0,
         st_blksize: 0,
         st_blocks: 0,
@@ -86,7 +118,10 @@ fn stat_fd(fd: RawFd) -> Result<Stat, String> {
         st_mtime_nsec: 0,
         st_ctime: 0,
         st_ctime_nsec: 0,
+        #[cfg(not(target_arch = "aarch64"))]
         __unused: [0; 3],
+        #[cfg(target_arch = "aarch64")]
+        __unused: [0; 2],
     };
     if unsafe { fstat(fd, &mut value) } != 0 {
         return Err("fstat failed".to_string());
