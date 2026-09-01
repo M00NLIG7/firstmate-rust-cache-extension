@@ -94,18 +94,19 @@ test("configuration mutations reuse their private lock directory", { skip: proce
   }
 });
 
-test("concurrent configuration mutations retain both selections", { skip: process.platform !== "linux" }, async () => {
+test("concurrent first configuration mutations retain both selections", { skip: process.platform !== "linux" }, async () => {
   const root = await temporaryRoot("concurrent configuration mutations");
   try {
     const first = await createProject(root, "first", "git@github.com:example/concurrent-first.git");
     const second = await createProject(root, "second", "git@github.com:example/concurrent-second.git");
     const env = await makeEnvironment(root, null);
-    const [firstResult, secondResult] = await Promise.all([
+    const results = await Promise.all([
+      cli(["enable", "--project", first, "--max-size", "8MiB"], first, env),
+      cli(["enable", "--project", second, "--max-size", "8MiB"], second, env),
       cli(["enable", "--project", first, "--max-size", "8MiB"], first, env),
       cli(["enable", "--project", second, "--max-size", "8MiB"], second, env),
     ]);
-    assert.equal(firstResult.code, 0, firstResult.stderr);
-    assert.equal(secondResult.code, 0, secondResult.stderr);
+    for (const result of results) assert.equal(result.code, 0, result.stderr);
     const config = JSON.parse(await readFile(join(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR, "config.json"), "utf8"));
     assert.equal(config.projects.length, 2);
   } finally {
@@ -119,8 +120,10 @@ test("fresh cache-removing uninstall is idempotent without configuration residue
     const project = await createProject(root, "project", "git@github.com:example/fresh-uninstall.git");
     const env = await makeEnvironment(root, null);
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const result = await cli(["uninstall", "--remove-cache"], project, env);
-      assert.equal(result.code, 0, result.stderr);
+      const results = await Promise.all(
+        Array.from({ length: 4 }, () => cli(["uninstall", "--remove-cache"], project, env)),
+      );
+      for (const result of results) assert.equal(result.code, 0, result.stderr);
       await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR), { code: "ENOENT" });
       await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
     }
