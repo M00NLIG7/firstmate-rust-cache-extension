@@ -208,7 +208,7 @@ test("active lease capacity bypasses excess executions and recovers after releas
   }
 });
 
-test("unsupported platforms refuse concurrent configuration mutations without state", { skip: supportsDescriptorBoundCacheOperations() }, async () => {
+test("unsupported platforms serialize concurrent configuration mutations without cache state", { skip: supportsDescriptorBoundCacheOperations() }, async () => {
   const root = await temporaryRoot("unsupported configuration mutation");
   try {
     const first = await createProject(root, "first", "git@github.com:example/unsupported-first.git");
@@ -218,12 +218,9 @@ test("unsupported platforms refuse concurrent configuration mutations without st
       cli(["enable", "--project", first, "--max-size", "8MiB"], first, env),
       cli(["enable", "--project", second, "--max-size", "8MiB"], second, env),
     ]);
-    assert.equal(supportsDescriptorBoundCacheOperations(), false);
-    for (const result of results) {
-      assert.equal(result.code, 2);
-      assert.match(result.stderr, /refusing configuration mutation/);
-    }
-    await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR), { code: "ENOENT" });
+    for (const result of results) assert.equal(result.code, 0, result.stderr);
+    const config = JSON.parse(await readFile(join(env.FIRSTMATE_RUST_CACHE_CONFIG_DIR, "config.json"), "utf8"));
+    assert.equal(config.projects.length, 2);
     await assert.rejects(stat(env.FIRSTMATE_RUST_CACHE_CACHE_DIR), { code: "ENOENT" });
   } finally {
     await rm(root, { recursive: true, force: true });
