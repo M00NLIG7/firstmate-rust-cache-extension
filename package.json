@@ -44,6 +44,6 @@
   },
   "devDependencies": {
     "@earendil-works/pi-coding-agent": "0.84.0",
-    "yaml": "2.6.1"
+    "yaml": "2.8.3"
   }
 }

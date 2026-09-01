@@ -139,6 +139,13 @@ test("pinned lease support requires an accessible procfs boundary", async () => 
   try {
     assert.equal(await supportsPinnedCompilerLeases("darwin"), false);
     assert.equal(await supportsPinnedCompilerLeases("linux", join(root, "missing procfs")), false);
+    if (process.platform === "linux") {
+      assert.equal(
+        await supportsPinnedCompilerLeases(),
+        true,
+        "the real procfs descriptor link must prove the pinned-directory capability",
+      );
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
